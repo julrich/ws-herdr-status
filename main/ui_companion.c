@@ -1613,6 +1613,38 @@ static void ui_render_summary(const herdr_status_t *s)
 /* Runs in the LVGL task (lv_timer), so it is the only task that touches LVGL. */
 static void ui_tick(lv_timer_t *timer)
 {
+    /* Every timer in this UI is due every UI_LOOK_TICK. A run that is later than
+     * the slack below means the LVGL task did not get the CPU — which is what a
+     * marginal WiFi link does to it, since the WiFi task runs at priority 23 and
+     * this one at 4. That is the difference between "the input is broken" and "the
+     * whole UI was stalled", and it is not otherwise visible: the touch driver's
+     * own logs look the same either way.
+     *
+     * Reported at most once a second, carrying the worst lateness in that second,
+     * so a stalling link cannot flood the console with it. */
+    {
+        static uint32_t s_last_tick_ms;
+        static uint32_t s_worst_late_ms;
+        static uint32_t s_last_report_ms;
+
+        const uint32_t now = lv_tick_get();
+
+        if (s_last_tick_ms != 0) {
+            const uint32_t late = lv_tick_elaps(s_last_tick_ms);
+
+            if (late > UI_LOOK_TICK + 100 && late > s_worst_late_ms) {
+                s_worst_late_ms = late;
+            }
+        }
+        s_last_tick_ms = now;
+
+        if (s_worst_late_ms != 0 && lv_tick_elaps(s_last_report_ms) >= 1000) {
+            UI_LOGW(TAG, "lvgl late by %u ms", (unsigned)s_worst_late_ms);
+            s_worst_late_ms   = 0;
+            s_last_report_ms  = now;
+        }
+    }
+
     LV_UNUSED(timer);
 
     herdr_status_t s;
@@ -1742,6 +1774,12 @@ static void screen_event_cb(lv_event_t *e)
         s_last_click_tick = lv_tick_get();
         s_last_click_list = list_half;
 
+        /* Which gesture this was, as the UI understood it. The driver has already
+         * logged the touch itself, so the pair of lines says whether a gesture
+         * that did nothing was not recognised or recognised and then had no
+         * visible effect. */
+        UI_LOGI(TAG, "click %s%s", list_half ? "list" : "face", dbl ? " (double)" : "");
+
         if (dbl) {
             /* Cancel the page the first click of this pair left waiting: the pair
              * means the overlay, and the list should not also move. */
@@ -1778,6 +1816,8 @@ static void screen_event_cb(lv_event_t *e)
 /* The screen's click handler (see screen_event_cb). */
 void ui_companion_on_tap(void)
 {
+    UI_LOGI(TAG, "tap: refresh from the bridge");
+
     s_taps++;  /* kept here rather than in the event callback so the harness's
                 * direct calls are counted too */
     herdr_client_poll_now();
