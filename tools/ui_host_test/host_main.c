@@ -73,6 +73,9 @@ static int g_h = 320;
 
 #define HEADLINE_Y_MIN 0
 #define HEADLINE_Y_MAX 30
+#define STATS_Y0    30   /* portrait stats line 0: headline_y 10 + 20        */
+#define STATS_ROW_H 14   /* ui_companion.c's per-line step                  */
+
 #define SUMMARY_Y_MIN  295
 #define SUMMARY_Y_MAX  320
 
@@ -362,6 +365,40 @@ static void load_scenario(const char *name)
     else if(strcmp(name, "done") == 0 || strcmp(name, "party") == 0) {
         set_agent(0, "Finished review", "omp", HERDR_ST_DONE, false);
         g_status.count = 1;
+    }
+    else if(strcmp(name, "stats") == 0) {
+        /* The desk's real agents and their real /stats numbers, which is where the
+         * formatting questions came from (four sessions, 1.1G input tokens between
+         * them, one session quiet overnight). */
+        set_agent(0, "Waveshare", "omp",  HERDR_ST_WORKING, true);
+        set_agent(1, "rm Upgrade", "omp", HERDR_ST_IDLE,    false);
+        set_agent(2, "Racer", "omp",      HERDR_ST_IDLE,    false);
+        set_agent(3, "tsnm", "omp",       HERDR_ST_IDLE,    false);
+        g_status.count = 4;
+
+        static const struct { uint32_t in, out, calls, msgs, age; } live[4] = {
+            { 322361294u, 723439u,  804,  790,     6 },
+            { 522287761u, 990343u, 1280, 1142,  9602 },
+            {  14171410u, 159329u,  173,  101,  8057 },
+            { 239267051u, 463330u,  735,  538, 103149 },
+        };
+
+        g_sessions.valid      = true;
+        g_sessions.sessions   = 4;
+        g_sessions.tokens_in  = 1097192927u;
+        g_sessions.tokens_out = 2330905u;
+        g_sessions.messages   = 2567;
+        g_sessions.tool_calls = 2988;
+        g_sessions.age_s      = 11;
+
+        for(int i = 0; i < 4; i++) {
+            g_sessions.per[i].tokens_in  = live[i].in;
+            g_sessions.per[i].tokens_out = live[i].out;
+            g_sessions.per[i].tool_calls = live[i].calls;
+            g_sessions.per[i].messages   = live[i].msgs;
+            g_sessions.per[i].age_s      = live[i].age;
+            snprintf(g_sessions.per[i].model, sizeof g_sessions.per[i].model, "deepseek-v4.1-f");
+        }
     }
     else if(strcmp(name, "idle") == 0 || strcmp(name, "blush") == 0) {
         set_agent(0, "Waiting", "omp", HERDR_ST_IDLE, false);
@@ -911,6 +948,49 @@ static void check_view_switch(result_t *r)
            ui_view_name(ui_companion_view()));
 }
 
+/* The stats view: the only place the session numbers appear, and until this
+ * scenario existed nothing asserted it at all. The numbers are the desk's own, at
+ * the magnitudes that made the view unreadable before the G tier and the h/d
+ * ages: a billion tokens printed as "1097.1M", an overnight session as "9602s". */
+static void check_stats(result_t *r)
+{
+    char got[64];
+
+    drag(BODY_CX + 60, BODY_CY, BODY_CX - 60, BODY_CY, 4);   /* swipe into stats */
+    EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "swipe gave view %s",
+           ui_view_name(ui_companion_view()));
+
+    /* Page one is link and device: the same numbers the long-press overlay shows. */
+    EXPECT(r, assert_text(0, 30, "STATS", got, sizeof got),
+           "stats title want \"STATS\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0, STATS_Y0 + 6, "LINK", got, sizeof got),
+           "page 1 line 0 want \"LINK\" got \"%s\"", got);
+
+    /* Page two is the sessions, a vertical swipe away. */
+    drag(BODY_CX, BODY_CY + 40, BODY_CX, BODY_CY - 40, 4);   /* swipe up: page 2 */
+
+    EXPECT(r, assert_text(STATS_Y0, STATS_Y0 + 6, "SESS 4   1.0G in", got, sizeof got),
+           "session totals want \"SESS 4   1.0G in\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0 + STATS_ROW_H, STATS_Y0 + STATS_ROW_H + 6,
+                          "out 2.3M  msg 2567", got, sizeof got),
+           "output/messages want \"out 2.3M  msg 2567\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0 + 2 * STATS_ROW_H, STATS_Y0 + 2 * STATS_ROW_H + 6,
+                          "calls 2988  last 11s", got, sizeof got),
+           "calls/age want \"calls 2988  last 11s\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0 + 3 * STATS_ROW_H, STATS_Y0 + 3 * STATS_ROW_H + 6,
+                          "Waveshare 322.3M 804c", got, sizeof got),
+           "first session row want \"Waveshare 322.3M 804c\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0 + 4 * STATS_ROW_H, STATS_Y0 + 4 * STATS_ROW_H + 6,
+                          "rm Upgrad 522.2M 1280c", got, sizeof got),
+           "second session row (9-char label) want \"rm Upgrad 522.2M 1280c\" got \"%s\"", got);
+
+    /* The link/device page fills all eleven lines, the sessions page only seven:
+     * anything still showing below the rows is the previous page bleeding through
+     * (seen on the panel render as the IMU and rotation lines under the sessions). */
+    EXPECT(r, assert_text(STATS_Y0 + 7 * STATS_ROW_H, STATS_Y0 + 7 * STATS_ROW_H + 6, "", got, sizeof got),
+           "line 8 of the sessions page should be empty, got \"%s\"", got);
+}
+
 /* Six agents, four rows: a vertical swipe has to page the list. */
 static void check_paging(result_t *r)
 {
@@ -1314,6 +1394,7 @@ int main(void)
         { "party",    check_party    },
         { "view_switch", check_view_switch },
         { "paging",      check_paging, .landscape = false },
+        { "stats",       check_stats,  .landscape = false },
         { "overlay",     check_overlay },
         { "flourish",    check_flourish },
         { "land_blocked", check_land_blocked, true },
