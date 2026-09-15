@@ -31,6 +31,10 @@
 #define ROT_NVS_KEY "rot"
 #define ROT_QUARTER_DEG 90
 
+/* Read by the diagnostics overlay from the LVGL task, written by imu_rot. */
+static herdr_imu_stats_t s_stats;
+static portMUX_TYPE      s_stats_lock = portMUX_INITIALIZER_UNLOCKED;
+
 int ui_rotation_restore(void)
 {
 #if !CONFIG_HERDR_IMU_ROTATE
@@ -73,6 +77,13 @@ static const char *TAG = "imu";
 /* 40 samples x ~25 ms is about a second. */
 #define IMU_LOG_EVERY 40
 
+static void imu_stats_publish(const herdr_imu_stats_t *st)
+{
+    portENTER_CRITICAL(&s_stats_lock);
+    s_stats = *st;
+    portEXIT_CRITICAL(&s_stats_lock);
+}
+
 static void persist_rotation(int deg)
 {
     nvs_handle_t h;
@@ -112,13 +123,22 @@ static void imu_rot(void *arg)
     int logged = 0;
 #endif
 
+    herdr_imu_stats_t st = { .running = true, .present = true };
+    uint32_t          window_samples = 0;
+    int64_t           window_us      = esp_timer_get_time();
+    imu_stats_publish(&st);
+
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(IMU_TASK_PERIOD_MS));
 
         float ax, ay, az, gx, gy, gz;
         if (!imu_qmi8658_read(&ax, &ay, &az, &gx, &gy, &gz)) {
             /* No sample ready; the next pass picks it up, and the step measured
-             * then spans the wait as well. */
+             * then spans the wait as well. The reader cannot tell "nothing new"
+             * from a failed transaction, and both are a read that did not
+             * happen, which is what the overlay's error count reports. */
+            st.errors++;
+            imu_stats_publish(&st);
             continue;
         }
 
@@ -141,6 +161,24 @@ static void imu_rot(void *arg)
                 ESP_LOGI(TAG, "turned, rot=%d", rot);
             }
         }
+
+        /* Diagnostics for the overlay (main/ui_stats.h). The rate is measured
+         * over a one-second window rather than derived from the configured
+         * period: pdMS_TO_TICKS() rounds the delay and a slow read stretches a
+         * step, so 100 ms is an intention, not the truth. Dividing once per
+         * second keeps the number stable to the Hz. */
+        st.samples++;
+        st.axis       = (int8_t)rot_detector_normal_axis(&det);
+        st.sign       = (int8_t)rot_detector_normal_sign(&det);
+        st.calibrated = rot_detector_calibrated(&det);
+
+        window_samples++;
+        if (now_us - window_us >= 1000000) {
+            st.rate_hz = (uint32_t)((int64_t)window_samples * 1000000 / (now_us - window_us));
+            window_samples = 0;
+            window_us      = now_us;
+        }
+        imu_stats_publish(&st);
 
 #if CONFIG_HERDR_IMU_LOG_RAW
         if (++logged >= IMU_LOG_EVERY) {
@@ -165,4 +203,14 @@ void ui_rotation_start(void)
 #endif
     /* CONFIG_HERDR_IMU_ROTATE=n: nothing to start; the panel keeps the
      * orientation ui_rotation_restore() returned. */
+}
+
+void ui_rotation_stats_get(herdr_imu_stats_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    portENTER_CRITICAL(&s_stats_lock);
+    *out = s_stats;
+    portEXIT_CRITICAL(&s_stats_lock);
 }

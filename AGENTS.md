@@ -554,6 +554,43 @@ Two halves, no USB link needed after flashing:
   320x172. `make ui-test` covers both (`land_*` scenarios drive the same
   resolution switch the device uses).
 
+### Touch input, views and the stats source
+
+- **The touch path belongs to `main/ui_input.c`.** An ESP32 cannot see two fingers
+  through LVGL here: the esp_lvgl_port touch indev feeds LVGL a single point
+  (`data->point.x = touchpad_x[0]`), so the input task *removes* that indev
+  (`lvgl_port_remove_touch`), polls the handle itself with two-point reads and
+  dispatches through `ui_companion_on_*`. Re-adding the port's indev would break
+  gestures and fire taps twice.
+- Recognition lives in `main/touch_gesture.c` — pure C, host-tested by
+  `make gesture-test`. Two traps are baked in and must not be undone: travel is
+  tracked **per finger slot, not by the midpoint** (fingers lift a few tens of ms
+  apart, and the midpoint jumps by half the finger separation the moment one
+  leaves), and origins are **re-latched whenever the reported finger count
+  changes** (a controller reports the survivor of a two-finger tap in slot 0 even
+  when it started in slot 1).
+- The two views are two `lv_obj` containers, both children of the single screen,
+  each at the origin so children keep the coordinates they were written with;
+  switching is one hidden flag. Do not turn them into separate LVGL screens:
+  main.c's rotation path auto-deletes the old screen, so a second screen's stored
+  pointer would dangle.
+- The diagnostics overlay is created on demand and deleted on the next two-finger
+  tap; `ui_companion_create()` clears those pointers because they die with the
+  screen.
+- **Stats come from the agents' own session logs**, not from herdr: herdr exposes
+  only the session *path* (`agent_session.kind == "path"`), while the omp jsonl
+  carries `message.message.usage.{input,output,...}` and `usage.cost.total` in
+  USD. The bridge reads *only* those numeric fields — the same files are full of
+  conversation content, none of which may leave the PC — and parses them
+  incrementally (remember (path, size), read only the appended bytes: ~0.1–1.7 ms
+  against 116 ms for a re-parse of the largest session). There is no second
+  harness on this machine; `π` is omp's own title glyph. `~/.omp/stats.db` is
+  pre-aggregated but only as fresh as the last `omp stats` run, so it is not used.
+- `main/ui_companion.c`, `main/touch_gesture.c` and `main/ui_stats.h` stay free of
+  esp_* includes; the diagnostics getters declared in `ui_stats.h` are esp-side
+  (`herdr_client.c`, `ui_rotation.c`, `ui_input.c`, `ui_device.c`) and the host
+  harness stubs them, exactly as it stubs `herdr_client_get()`.
+
 ### What "working" looks like in the log
 
 ```

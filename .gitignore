@@ -6,3 +6,5 @@ __pycache__/
 tools/ui_host_test/harness
 tools/ui_host_test/*.ppm
 tools/ui_host_test/build/
+tools/rotation_test/rotation_test
+tools/gesture_test/gesture_test

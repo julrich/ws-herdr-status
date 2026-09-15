@@ -11,10 +11,12 @@
 
 #include "ui_companion.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "herdr_status_types.h"
+#include "ui_stats.h"
 
 /* Real value comes from main/Kconfig.projbuild (range 1..6); the host harness
  * has no sdkconfig, so fall back to the same default. */
@@ -143,6 +145,24 @@ static lay_t L;
 #define PART_D          5
 #define CONF_MS         1200
 #define CONF_OPA        255 /* opaque: confetti is paper, and it keeps the probe exact */
+
+/* Tap flourish: a short, mood-specific reaction to a single tap, on top of the
+ * body squash. Ring growth and duration, the background wash strength, and how
+ * many particles to throw (0 where the mood's own motes own the particle pool).
+ * Kept short — this is an acknowledgement, not a scene change. */
+typedef struct {
+    uint32_t ring_ms;
+    int32_t  ring_grow;
+    uint8_t  wash;    /* 0..255 weight of the mood colour behind everything */
+    uint8_t  sparks;  /* particles thrown, 0 = none */
+    int32_t  rise;    /* how far those particles travel */
+    uint32_t hold_ms; /* how long the wash lingers */
+} flourish_cfg_t;
+
+/* Views. Two of them, swiped between: the companion itself, and a page of
+ * numbers about the link, the device and the agents' sessions. */
+#define STATS_LINES 11
+#define OVERLAY_LINES 12
 
 /* Both UI timers run at this period, which is also the glance countdown unit.
  * The host harness identifies UI timers by this period when it tears a screen
@@ -365,6 +385,31 @@ static lv_obj_t *s_row[UI_ROWS];
 static lv_obj_t *s_dot[UI_ROWS];
 static lv_obj_t *s_row_label[UI_ROWS];
 static lv_obj_t *s_row_status[UI_ROWS];
+
+/* Views and interaction state. */
+static ui_view_t s_view;
+static int       s_page;          /* which slice of the agent list is shown */
+static lv_obj_t *s_mood_cont;     /* holds the whole companion view */
+static lv_obj_t *s_stats_cont;    /* holds the stats view */
+static lv_obj_t *s_overlay;       /* diagnostics panel, created on demand */
+static lv_obj_t *s_overlay_text;
+static lv_obj_t *s_stats_title;
+static lv_obj_t *s_stats_txt[STATS_LINES];
+static uint32_t  s_taps;
+static uint32_t  s_flourish_count;
+static int       s_stats_page;    /* the stats view has two pages of its own */
+static int       s_stats_pages;
+
+/* Per-mood tap reactions. BLOCKED and OFFLINE get sparks because the particle
+ * pool is idle in those moods; WORKING and SLEEP leave it to their motes. */
+static const flourish_cfg_t s_flourish[MOOD_N] = {
+    [MOOD_BLOCKED] = { .ring_ms = 260, .ring_grow = 40, .wash = 40, .sparks = 3, .rise = 18, .hold_ms = 200 },
+    [MOOD_WORKING] = { .ring_ms = 220, .ring_grow = 46, .wash = 30, .sparks = 0, .rise = 0,  .hold_ms = 160 },
+    [MOOD_DONE]    = { .ring_ms = 240, .ring_grow = 52, .wash = 44, .sparks = 8, .rise = -1, .hold_ms = 220 },
+    [MOOD_IDLE]    = { .ring_ms = 340, .ring_grow = 34, .wash = 18, .sparks = 0, .rise = 0,  .hold_ms = 260 },
+    [MOOD_SLEEP]   = { .ring_ms = 380, .ring_grow = 30, .wash = 0,  .sparks = 0, .rise = 0,  .hold_ms = 0 },
+    [MOOD_OFFLINE] = { .ring_ms = 200, .ring_grow = 44, .wash = 0,  .sparks = 4, .rise = 14, .hold_ms = 0 },
+};
 
 static mood_t   s_mood;
 static bool     s_bob_running;
@@ -927,6 +972,359 @@ static void ui_start_burst(void)
     }
 }
 
+/* ---- views ------------------------------------------------------------- */
+
+static void ui_stats_render(void);
+static void ui_overlay_render(void);
+static void ui_render_list(const herdr_status_t *s);
+static void ui_render_summary(const herdr_status_t *s);
+
+const char *ui_view_name(ui_view_t view)
+{
+    return (view == UI_VIEW_STATS) ? "stats" : "mood";
+}
+
+ui_view_t ui_companion_view(void)
+{
+    return s_view;
+}
+
+/* One flag decides which containers are on screen. The stats view is refreshed on
+ * the way in so it never shows numbers from the last time it was looked at. */
+static void ui_apply_view(void)
+{
+    if (s_view == UI_VIEW_STATS) {
+        lv_obj_add_flag(s_mood_cont, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_stats_cont, LV_OBJ_FLAG_HIDDEN);
+        ui_stats_render();
+    } else {
+        lv_obj_add_flag(s_stats_cont, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_mood_cont, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void ui_companion_on_switch_view(int dir)
+{
+    if (dir == 0) {
+        return;
+    }
+    int v = (int)s_view + ((dir > 0) ? 1 : -1);
+    if (v < 0) {
+        v = UI_VIEW_COUNT - 1;
+    } else if (v >= UI_VIEW_COUNT) {
+        v = 0;
+    }
+    s_view = (ui_view_t)v;
+    ui_apply_view();
+    UI_LOGI(TAG, "view=%s", ui_view_name(s_view));
+}
+
+/* Vertical swipe: pages whichever view is showing. The mood view pages the agent
+ * list (only useful when the bridge reports more agents than there are rows) and
+ * the stats view pages its two screens of numbers. */
+void ui_companion_on_page(int dir)
+{
+    if (dir == 0) {
+        return;
+    }
+
+    herdr_status_t s;
+    if (!herdr_client_get(&s)) {
+        return;
+    }
+
+    if (s_view == UI_VIEW_STATS) {
+        if (s_stats_pages <= 1) {
+            return;
+        }
+        s_stats_page += (dir > 0) ? 1 : -1;
+        if (s_stats_page < 0) {
+            s_stats_page = s_stats_pages - 1;
+        } else if (s_stats_page >= s_stats_pages) {
+            s_stats_page = 0;
+        }
+        ui_stats_render();
+        return;
+    }
+
+    const int pages = (s.count + UI_ROWS - 1) / UI_ROWS;
+    if (pages <= 1) {
+        return; /* everything already fits */
+    }
+    s_page += (dir > 0) ? 1 : -1;
+    if (s_page < 0) {
+        s_page = pages - 1;
+    } else if (s_page >= pages) {
+        s_page = 0;
+    }
+    ui_render_list(&s);
+    ui_render_summary(&s);
+    UI_LOGI(TAG, "list page %d/%d", s_page + 1, pages);
+}
+
+/* ---- diagnostics overlay ------------------------------------------------- */
+
+void ui_companion_on_toggle_overlay(void)
+{
+    if (s_overlay != NULL) {
+        lv_obj_del(s_overlay); /* takes the label with it */
+        s_overlay      = NULL;
+        s_overlay_text = NULL;
+        UI_LOGI(TAG, "overlay off");
+        return;
+    }
+
+    s_overlay = lv_obj_create(s_scr);
+    make_passive(s_overlay);
+    lv_obj_set_size(s_overlay, SCR_W, SCR_H);
+    lv_obj_set_pos(s_overlay, 0, 0);
+    lv_obj_set_style_radius(s_overlay, 0, 0);
+    lv_obj_set_style_bg_color(s_overlay, lv_color_hex(COL_BG), 0);
+    lv_obj_set_style_bg_opa(s_overlay, 240, 0);
+    lv_obj_set_style_border_width(s_overlay, 1, 0);
+    lv_obj_set_style_border_color(s_overlay, lv_color_hex(COL_TRACK), 0);
+    lv_obj_set_style_border_opa(s_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(s_overlay, 5, 0);
+
+    s_overlay_text = lv_label_create(s_overlay);
+    make_passive(s_overlay_text);
+    lv_obj_set_style_text_font(s_overlay_text, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_overlay_text, lv_color_hex(COL_TEXT), 0);
+    lv_obj_set_pos(s_overlay_text, 0, 0);
+    lv_label_set_long_mode(s_overlay_text, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_overlay_text, SCR_W - 12);
+
+    ui_overlay_render();
+    UI_LOGI(TAG, "overlay on");
+}
+
+/* Everything an overlay line can say that the firmware can answer about itself.
+ * The whole point is that this is readable when something is wrong, so it is
+ * deliberately dense and uses short labels. */
+static void ui_overlay_render(void)
+{
+    if (s_overlay_text == NULL) {
+        return;
+    }
+
+    herdr_link_stats_t  link = { 0 };
+    herdr_imu_stats_t   imu  = { 0 };
+    herdr_input_stats_t in   = { 0 };
+    herdr_status_t      s    = { 0 };
+
+    herdr_client_stats(&link);
+    ui_rotation_stats_get(&imu);
+    ui_input_stats_get(&in);
+    const bool have = herdr_client_get(&s);
+
+    lv_mem_monitor_t mon;
+    lv_mem_monitor(&mon);
+
+    const uint32_t up = lv_tick_get() / 1000;
+    char           buf[512];
+
+    snprintf(buf, sizeof buf,
+             "up      %02u:%02u:%02u\n"
+             "heap    %u K low %u K\n"
+             "lvgl    %u%% frag %u%%\n"
+             "bridge  gen %u  %s\n"
+             "poll    %u ok %u err\n"
+             "rtt     %u ms  fail %u\n"
+             "agents  %d  ovf %d\n"
+             "imu     %u Hz  err %u\n"
+             "axis    %d %s%c  %s\n"
+             "rot     %d  %dx%d\n"
+             "touch   %u p %u e\n"
+             "gest    %u/%u/%u/%u\n"
+             "view    %s  taps %u",
+             (unsigned)(up / 3600), (unsigned)((up / 60) % 60), (unsigned)(up % 60),
+             (unsigned)(ui_device_free_heap() / 1024), (unsigned)(ui_device_min_free_heap() / 1024),
+             (unsigned)mon.used_pct, (unsigned)mon.frag_pct,
+             (unsigned)link.gen, link.online ? "online" : "offline",
+             (unsigned)link.polls, (unsigned)link.fail_total,
+             (unsigned)link.rtt_ms, (unsigned)link.failures,
+             have ? s.count : 0, have ? s.overflow : 0,
+             (unsigned)imu.rate_hz, (unsigned)imu.errors,
+             (int)imu.axis, imu.calibrated ? "cal" : "raw",
+             (imu.sign > 0) ? '+' : '-', imu.present ? "ok" : "gone",
+             SPLIT ? 1 : 0, SCR_W, SCR_H,
+             (unsigned)in.polls, (unsigned)in.read_errors,
+             (unsigned)in.taps, (unsigned)in.taps2, (unsigned)in.swipes, (unsigned)in.ignored,
+             ui_view_name(s_view), (unsigned)s_taps);
+
+    lv_label_set_text(s_overlay_text, buf);
+}
+
+/* ---- stats view ---------------------------------------------------------- */
+
+/* Formats a token count so it fits a 12 px font on a 172 px wide screen. */
+static void fmt_tokens(char *buf, size_t n, uint32_t tokens)
+{
+    /* uint32_t is `unsigned long` on the C6 but `unsigned int` on the host, so
+     * every argument is cast: -Werror=format catches the difference on one of the
+     * two builds otherwise. */
+    if (tokens >= 1000000u) {
+        snprintf(buf, n, "%u.%uM", (unsigned)(tokens / 1000000u), (unsigned)((tokens / 100000u) % 10u));
+    } else if (tokens >= 1000u) {
+        snprintf(buf, n, "%u.%uk", (unsigned)(tokens / 1000u), (unsigned)((tokens / 100u) % 10u));
+    } else {
+        snprintf(buf, n, "%u", (unsigned)tokens);
+    }
+}
+
+/* One line of the stats view. The view is 11 lines on both orientations, and
+ * vertical swipes page between the link/device page and the sessions page. */
+static void stats_line(int idx, const char *fmt, ...)
+{
+    if (idx < 0 || idx >= STATS_LINES || s_stats_txt[idx] == NULL) {
+        return;
+    }
+    va_list ap;
+    char    buf[48];
+
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    lv_label_set_text(s_stats_txt[idx], buf);
+}
+
+static void ui_stats_render(void)
+{
+    herdr_link_stats_t  link = { 0 };
+    herdr_imu_stats_t   imu  = { 0 };
+    herdr_input_stats_t in   = { 0 };
+
+    herdr_client_stats(&link);
+    ui_rotation_stats_get(&imu);
+    ui_input_stats_get(&in);
+
+    herdr_status_t   s = { 0 };
+    const bool       have = herdr_client_get(&s);
+
+    if (s_stats_page == 0) {
+        /* Link, device and the things that go wrong. */
+        stats_line(0, "LINK");
+        stats_line(1, " gen %u  %s", (unsigned)link.gen, link.online ? "online" : "offline");
+        stats_line(2, " poll %u ok  %u err", (unsigned)link.polls, (unsigned)link.fail_total);
+        stats_line(3, " rtt %u ms  fail %u", (unsigned)link.rtt_ms, (unsigned)link.failures);
+        stats_line(4, "DEVICE");
+        stats_line(5, " up %uh%02um  heap %uK", (unsigned)(lv_tick_get() / 3600000u),
+                   (unsigned)((lv_tick_get() / 60000u) % 60u), (unsigned)(ui_device_free_heap() / 1024));
+        lv_mem_monitor_t mon;
+        lv_mem_monitor(&mon);
+        stats_line(6, " lvgl %u%% frag %u%%", (unsigned)mon.used_pct, (unsigned)mon.frag_pct);
+        stats_line(7, " imu %u Hz  %s", (unsigned)imu.rate_hz, imu.calibrated ? "calibrated" : "raw");
+        stats_line(8, " ax %d %c  err %u", (int)imu.axis, (imu.sign > 0) ? '+' : '-', (unsigned)imu.errors);
+        stats_line(9, " rot %s  %dx%d", SPLIT ? "land" : "port", SCR_W, SCR_H);
+        stats_line(10, " touch %u  tap %u/%u", (unsigned)in.polls, (unsigned)in.taps, (unsigned)in.taps2);
+        s_stats_pages = 2;
+        return;
+    }
+
+    /* Sessions page: what the agents have actually been doing, from the bridge's
+     * read of their session logs. */
+    herdr_sessions_t sess = { 0 };
+    const bool       have_sessions = herdr_stats_get(&sess) && sess.valid;
+
+    if (!have_sessions) {
+        stats_line(0, "SESSIONS");
+        stats_line(1, " no data yet — the bridge");
+        stats_line(2, " has not answered /stats");
+        for (int i = 3; i < STATS_LINES; i++) {
+            stats_line(i, "");
+        }
+        return;
+    }
+
+    char tin[16], tout[16];
+    fmt_tokens(tin, sizeof tin, sess.tokens_in);
+    fmt_tokens(tout, sizeof tout, sess.tokens_out);
+    stats_line(0, "SESS %u   %s in", (unsigned)sess.sessions, tin);
+    stats_line(1, "out %s  msg %u", tout, (unsigned)sess.messages);
+    stats_line(2, "calls %u  last %us", (unsigned)sess.tool_calls, (unsigned)sess.age_s);
+
+    const int shown = (have && s.count < HERDR_MAX_AGENTS) ? s.count : HERDR_MAX_AGENTS;
+    for (int i = 0; i < STATS_LINES - 3 && i < shown; i++) {
+        fmt_tokens(tin, sizeof tin, sess.per[i].tokens_in);
+        stats_line(3 + i, "%-9.9s %s %uc", have ? s.agents[i].label : "?", tin, sess.per[i].tool_calls);
+    }
+}
+
+/* A tap's reaction: a short ring, an optional wash of background colour, and —
+ * in the moods whose particle pool is idle — a fistful of sparks. Everything
+ * reuses what the mood-change burst already owns, so a tap during a burst
+ * re-aims it instead of doubling it up. */
+static void ui_flourish_start(void)
+{
+    const flourish_cfg_t *f = &s_flourish[s_mood];
+
+    s_flourish_count++;
+    s_burst_colour = s_moods[s_mood].body;
+
+    lv_anim_del(s_ripple[0], anim_ripple);
+    lv_obj_set_style_border_color(s_ripple[0], lv_color_hex(s_burst_colour), 0);
+    lv_obj_clear_flag(s_ripple[0], LV_OBJ_FLAG_HIDDEN);
+    anim_ripple(s_ripple[0], BODY_D);
+
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_ripple[0]);
+    lv_anim_set_exec_cb(&a, anim_ripple);
+    lv_anim_set_values(&a, BODY_D, BODY_D + f->ring_grow);
+    lv_anim_set_time(&a, f->ring_ms);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_start(&a);
+
+    if (f->wash > 0) {
+        lv_anim_del(s_scr, anim_bg_tint);
+        anim_bg_tint(s_scr, 0);
+
+        lv_anim_t b;
+        lv_anim_init(&b);
+        lv_anim_set_var(&b, s_scr);
+        lv_anim_set_exec_cb(&b, anim_bg_tint);
+        lv_anim_set_values(&b, 0, f->wash);
+        lv_anim_set_time(&b, 90);
+        lv_anim_set_playback_time(&b, f->hold_ms);
+        lv_anim_set_path_cb(&b, lv_anim_path_ease_out);
+        lv_anim_start(&b);
+    }
+
+    if (f->sparks == 0) {
+        return;
+    }
+    ui_stop_particles();
+    if (f->rise < 0) {
+        ui_start_confetti(); /* DONE: the pool is free there, so throw paper */
+        return;
+    }
+    for (int i = 0; i < f->sparks && i < PART_N; i++) {
+        part_cfg_t *c = &s_part_cfg[i];
+
+        c->x0  = BODY_CX + (int32_t)lv_rand(0, BODY_D) - BODY_D / 2;
+        c->y0  = BODY_CY;
+        c->x1  = 0;
+        c->y1  = f->rise + (int32_t)lv_rand(0, 6);
+        c->ms  = 260 + lv_rand(0, 140);
+        c->opa = 255;
+
+        lv_obj_set_pos(s_part[i], c->x0, c->y0);
+        lv_obj_set_style_bg_color(s_part[i], lv_color_hex(COL_SPARKLE), 0);
+        lv_obj_set_style_radius(s_part[i], LV_RADIUS_CIRCLE, 0);
+        anim_mote(s_part[i], 0);
+
+        lv_anim_t c2;
+        lv_anim_init(&c2);
+        lv_anim_set_var(&c2, s_part[i]);
+        lv_anim_set_exec_cb(&c2, anim_mote);
+        lv_anim_set_values(&c2, 0, 1000);
+        lv_anim_set_delay(&c2, (uint32_t)i * 40);
+        lv_anim_set_time(&c2, c->ms);
+        lv_anim_set_path_cb(&c2, lv_anim_path_ease_out);
+        lv_anim_start(&c2);
+    }
+}
+
 /* ---- mood ---------------------------------------------------------------- */
 
 static mood_t mood_for(const herdr_status_t *s)
@@ -1052,26 +1450,31 @@ static uint32_t state_colour(herdr_agent_state_t st)
 
 static void ui_render_list(const herdr_status_t *s)
 {
-    const int shown = (s->count < UI_ROWS) ? s->count : UI_ROWS;
+    /* s_page selects which slice of the list is on screen; the rows themselves
+     * never move, so the layout stays identical from page to page. */
+    const int first = s_page * UI_ROWS;
+    const int shown = (s->count - first < UI_ROWS) ? (s->count - first) : UI_ROWS;
 
     for (int i = 0; i < UI_ROWS; i++) {
-        if (i >= shown) {
+        if (i >= shown || i + first >= s->count) {
             lv_obj_add_flag(s_row[i], LV_OBJ_FLAG_HIDDEN);
             continue;
         }
         lv_obj_clear_flag(s_row[i], LV_OBJ_FLAG_HIDDEN);
 
         /* Never route agent text through a format string. */
-        char buf[64];
-        if (s->agents[i].focused) {
-            snprintf(buf, sizeof buf, "> %.10s", s->agents[i].label);
+        const herdr_agent_t *a = &s->agents[first + i];
+        char                 buf[64];
+
+        if (a->focused) {
+            snprintf(buf, sizeof buf, "> %.10s", a->label);
         } else {
-            snprintf(buf, sizeof buf, "%.12s", s->agents[i].label);
+            snprintf(buf, sizeof buf, "%.12s", a->label);
         }
         lv_label_set_text(s_row_label[i], buf);
-        lv_label_set_text(s_row_status[i], herdr_state_name(s->agents[i].state));
+        lv_label_set_text(s_row_status[i], herdr_state_name(a->state));
 
-        lv_obj_set_style_bg_color(s_dot[i], lv_color_hex(state_colour(s->agents[i].state)), 0);
+        lv_obj_set_style_bg_color(s_dot[i], lv_color_hex(state_colour(a->state)), 0);
         lv_obj_set_style_opa(s_dot[i], s->online ? LV_OPA_COVER : 100, 0);
         lv_obj_set_style_text_color(s_row_label[i], lv_color_hex(s->online ? COL_TEXT : COL_DIM), 0);
         lv_obj_set_style_text_color(s_row_status[i], lv_color_hex(s->online ? COL_TEXT : COL_DIM), 0);
@@ -1120,10 +1523,15 @@ static void ui_render_summary(const herdr_status_t *s)
         snprintf(buf, sizeof buf, "%u %s, %u %s", parts[0], pnames[0], parts[1], pnames[1]);
     }
 
-    unsigned extra = (unsigned)(kinds > 2 ? kinds - 2 : 0) + (unsigned)s->overflow;
-    if (extra > 0) {
+    const int pages = (s->count + UI_ROWS - 1) / UI_ROWS;
+    if (pages > 1) {
+        /* More agents than rows: the page marker is the useful fact, and what is
+         * not on this page is exactly what the next page shows. */
         size_t len = strlen(buf);
-        snprintf(buf + len, sizeof buf - len, " +%u", extra);
+        snprintf(buf + len, sizeof buf - len, " p%d/%d", s_page + 1, pages);
+    }
+    if (s_page * UI_ROWS >= s->count) {
+        s_page = 0; /* the list shrank under us: never sit on an empty page */
     }
 
     /* The row is 156 px of montserrat_12; anything longer gets the short form. */
@@ -1160,6 +1568,14 @@ static void ui_tick(lv_timer_t *timer)
     ui_render_list(&s);
     ui_render_summary(&s);
 
+    /* The other two surfaces only need refreshing while they are visible. */
+    if (s_view == UI_VIEW_STATS) {
+        ui_stats_render();
+    }
+    if (s_overlay != NULL) {
+        ui_overlay_render();
+    }
+
     if (mood_changed || online_changed) {
         UI_LOGI(TAG, "mood=%s online=%d agents=%d overflow=%d",
                 s_mood_names[mood], (int)s.online, s.count, s.overflow);
@@ -1169,11 +1585,15 @@ static void ui_tick(lv_timer_t *timer)
 
 /* ---- tap ---------------------------------------------------------------- */
 
-static void screen_tap_cb(lv_event_t *e)
+/* Called by main/ui_input.c when the gesture recogniser sees a single tap, so it
+ * runs in the input task under the LVGL lock. The screen's own LV_EVENT_CLICKED
+ * wiring is gone: the port's touch indev is removed there, which means LVGL never
+ * sees a touch at all — this handler is the only tap path. */
+void ui_companion_on_tap(void)
 {
-    LV_UNUSED(e);
-
+    s_taps++;
     herdr_client_poll_now();
+    ui_flourish_start();
 
     if (s_squash_running) return;
 
@@ -1204,15 +1624,34 @@ void ui_companion_create(void)
     ui_layout_init(lv_obj_get_width(scr), lv_obj_get_height(scr));
 
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(scr, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(scr, lv_color_hex(COL_BG), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(scr, 0, 0);
-    lv_obj_add_event_cb(scr, screen_tap_cb, LV_EVENT_CLICKED, NULL);
+
+    /* Two views, each a container at the screen's origin, so every child keeps the
+     * coordinates it would have had on the screen itself and switching views is a
+     * single hidden flag. The overlay is created on demand and sits above both. */
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *c = lv_obj_create(scr);
+
+        make_passive(c);
+        lv_obj_set_size(c, SCR_W, SCR_H);
+        lv_obj_set_pos(c, 0, 0);
+        lv_obj_set_style_bg_opa(c, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(c, 0, 0);
+        lv_obj_set_style_radius(c, 0, 0);
+        lv_obj_set_style_pad_all(c, 0, 0);
+
+        if (i == 0) {
+            s_mood_cont = c;
+        } else {
+            s_stats_cont = c;
+        }
+    }
 
     /* Bottom-most children: the mood-change rings wash out from behind the face. */
     for (int i = 0; i < RIPPLE_N; i++) {
-        s_ripple[i] = create_blob(scr, BODY_D, BODY_D, BODY_CX, BODY_CY);
+        s_ripple[i] = create_blob(s_mood_cont, BODY_D, BODY_D, BODY_CX, BODY_CY);
         lv_obj_set_style_border_width(s_ripple[i], RIPPLE_W, 0);
         lv_obj_set_style_border_opa(s_ripple[i], LV_OPA_TRANSP, 0);
         lv_obj_add_flag(s_ripple[i], LV_OBJ_FLAG_HIDDEN);
@@ -1221,11 +1660,11 @@ void ui_companion_create(void)
     /* Particle pool, also behind the face: sparkles, dust and confetti all
      * radiate from behind the blob. */
     for (int i = 0; i < PART_N; i++) {
-        s_part[i] = create_blob(scr, PART_D, PART_D, 0, 0);
+        s_part[i] = create_blob(s_mood_cont, PART_D, PART_D, 0, 0);
         lv_obj_set_style_bg_opa(s_part[i], LV_OPA_TRANSP, 0);
     }
 
-    s_headline = lv_label_create(scr);
+    s_headline = lv_label_create(s_mood_cont);
     make_passive(s_headline);
     lv_obj_set_style_text_font(s_headline, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_letter_space(s_headline, 1, 0);
@@ -1236,26 +1675,26 @@ void ui_companion_create(void)
     }
 
     /* The ring is the static track; the sweep spins on top of it. */
-    s_ring = create_blob(scr, RING_D, RING_D, BODY_CX, BODY_CY);
+    s_ring = create_blob(s_mood_cont, RING_D, RING_D, BODY_CX, BODY_CY);
     lv_obj_set_style_border_width(s_ring, RING_W, 0);
     lv_obj_set_style_border_color(s_ring, lv_color_hex(COL_TRACK), 0);
     lv_obj_set_style_border_opa(s_ring, LV_OPA_COVER, 0);
 
-    s_sweep = create_arc(scr, RING_D, BODY_CX, BODY_CY, RING_W);
+    s_sweep = create_arc(s_mood_cont, RING_D, BODY_CX, BODY_CY, RING_W);
     lv_arc_set_angles(s_sweep, 0, SWEEP_SPAN);
 
-    s_body = create_blob(scr, BODY_D, BODY_D, BODY_CX, BODY_CY);
+    s_body = create_blob(s_mood_cont, BODY_D, BODY_D, BODY_CX, BODY_CY);
     lv_obj_set_style_bg_opa(s_body, LV_OPA_COVER, 0);
 
     for (int i = 0; i < 2; i++) {
         const lv_coord_t bx = BODY_CX + (i == 0 ? -BLUSH_DX : BLUSH_DX);
 
-        s_blush[i] = create_blob(scr, BLUSH_W, BLUSH_H, bx, BLUSH_CY);
+        s_blush[i] = create_blob(s_mood_cont, BLUSH_W, BLUSH_H, bx, BLUSH_CY);
         lv_obj_set_style_bg_color(s_blush[i], lv_color_hex(COL_BLUSH), 0);
     }
 
     for (int i = 0; i < 2; i++) {
-        s_eye[i] = create_blob(scr, EYE_W, EYE_H, BODY_CX + (i == 0 ? -EYE_DX : EYE_DX), EYE_CY);
+        s_eye[i] = create_blob(s_mood_cont, EYE_W, EYE_H, BODY_CX + (i == 0 ? -EYE_DX : EYE_DX), EYE_CY);
         lv_obj_set_style_bg_color(s_eye[i], lv_color_hex(COL_FACE), 0);
         lv_obj_set_style_bg_opa(s_eye[i], LV_OPA_COVER, 0);
         /* The glint is a child of the eye, so a glance carries it along and the
@@ -1266,33 +1705,33 @@ void ui_companion_create(void)
         lv_obj_set_style_bg_opa(s_glint[i], LV_OPA_COVER, 0);
     }
 
-    s_mouth = create_arc(scr, MOUTH_D, MOUTH_CX, MOUTH_CY, MOUTH_W);
+    s_mouth = create_arc(s_mood_cont, MOUTH_D, MOUTH_CX, MOUTH_CY, MOUTH_W);
     lv_obj_set_style_arc_color(s_mouth, lv_color_hex(COL_FACE), LV_PART_INDICATOR);
     lv_arc_set_angles(s_mouth, 45, 135);
 
-    s_mouth_flat = create_blob(scr, MOUTH_FLAT_W, MOUTH_FLAT_H, MOUTH_CX, MOUTH_CY);
+    s_mouth_flat = create_blob(s_mood_cont, MOUTH_FLAT_W, MOUTH_FLAT_H, MOUTH_CX, MOUTH_CY);
     lv_obj_set_style_bg_color(s_mouth_flat, lv_color_hex(COL_FACE), 0);
     lv_obj_set_style_bg_opa(s_mouth_flat, LV_OPA_COVER, 0);
 
     /* In front of the face: it has to slide over the cheek. */
-    s_sweat = create_blob(scr, SWEAT_W, SWEAT_H, SWEAT_X0, SWEAT_Y0);
+    s_sweat = create_blob(s_mood_cont, SWEAT_W, SWEAT_H, SWEAT_X0, SWEAT_Y0);
     lv_obj_set_style_bg_color(s_sweat, lv_color_hex(COL_DROP), 0);
 
-    s_alert = lv_label_create(scr);
+    s_alert = lv_label_create(s_mood_cont);
     make_passive(s_alert);
     lv_label_set_text(s_alert, "!");
     lv_obj_set_style_text_font(s_alert, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(s_alert, lv_color_hex(COL_BLOCKED), 0);
     lv_obj_set_pos(s_alert, ALERT_X, ALERT_Y);
 
-    s_z = lv_label_create(scr);
+    s_z = lv_label_create(s_mood_cont);
     make_passive(s_z);
     lv_label_set_text(s_z, "z");
     lv_obj_set_style_text_font(s_z, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_z, lv_color_hex(COL_DIM), 0);
     lv_obj_set_pos(s_z, Z_CX, Z_BASE_Y);
 
-    s_z2 = lv_label_create(scr);
+    s_z2 = lv_label_create(s_mood_cont);
     make_passive(s_z2);
     lv_label_set_text(s_z2, "z");
     lv_obj_set_style_text_font(s_z2, &lv_font_montserrat_12, 0);
@@ -1300,7 +1739,7 @@ void ui_companion_create(void)
     lv_obj_set_pos(s_z2, Z_CX + Z2_DX, Z_BASE_Y);
 
     for (int i = 0; i < UI_ROWS; i++) {
-        lv_obj_t *row = lv_obj_create(scr);
+        lv_obj_t *row = lv_obj_create(s_mood_cont);
         make_passive(row);
         lv_obj_set_size(row, LIST_W, LIST_ROW_H);
         lv_obj_set_pos(row, LIST_X, LIST_Y0 + i * LIST_ROW_H);
@@ -1325,7 +1764,7 @@ void ui_companion_create(void)
         lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
     }
 
-    s_summary = lv_label_create(scr);
+    s_summary = lv_label_create(s_mood_cont);
     make_passive(s_summary);
     lv_obj_set_style_text_font(s_summary, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(s_summary, lv_color_hex(COL_DIM), 0);
@@ -1334,6 +1773,39 @@ void ui_companion_create(void)
     } else {
         lv_obj_align(s_summary, LV_ALIGN_TOP_MID, 0, SUMMARY_Y);
     }
+
+    /* Stats view: a title plus a fixed block of lines, refreshed by
+     * ui_stats_render() whenever it is on screen. */
+    s_stats_title = lv_label_create(s_stats_cont);
+    make_passive(s_stats_title);
+    lv_obj_set_style_text_font(s_stats_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_stats_title, lv_color_hex(COL_TEXT), 0);
+    lv_label_set_text(s_stats_title, "STATS");
+    if (SPLIT) {
+        lv_obj_set_pos(s_stats_title, HEADLINE_X, HEADLINE_Y);
+    } else {
+        lv_obj_align(s_stats_title, LV_ALIGN_TOP_MID, 0, HEADLINE_Y);
+    }
+
+    for (int i = 0; i < STATS_LINES; i++) {
+        s_stats_txt[i] = lv_label_create(s_stats_cont);
+        make_passive(s_stats_txt[i]);
+        lv_obj_set_style_text_font(s_stats_txt[i], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(s_stats_txt[i], lv_color_hex(COL_TEXT), 0);
+        lv_obj_set_pos(s_stats_txt[i], SPLIT ? HEADLINE_X : 10,
+                       HEADLINE_Y + 20 + i * (SPLIT ? 12 : 14));
+        lv_label_set_text(s_stats_txt[i], "");
+    }
+
+    /* A rebuilt screen starts on the companion view, page one, no overlay: those
+     * pointers all died with the previous screen. */
+    s_view         = UI_VIEW_MOOD;
+    s_page         = 0;
+    s_stats_page   = 0;
+    s_stats_pages  = 2;
+    s_overlay      = NULL;
+    s_overlay_text = NULL;
+    ui_apply_view();
 
     /* Deterministic first frame: OFFLINE matches the pre-poll shared state
      * (gen 0, online false), so the first ui_tick that carries data re-renders. */
