@@ -14,6 +14,19 @@
 
 static const char *TAG = "esp_lcd_touch_axs5106";
 
+/* The controller can latch an interrupt that it never gets to clear: the first
+ * read after a touch fails, INT stays asserted, and every later read then fails
+ * too. Measured on this board as bursts of eight to ten NACKs per touch and a
+ * single recognised gesture in a whole session of tapping. Unlike the IMU on the
+ * same bus, this part has a reset pin, so the driver recovers by resetting it.
+ *
+ * The first failure is the one worth surviving: a transaction issued while the
+ * controller is still assembling a report is NACKed, and a retry a few
+ * milliseconds later succeeds. */
+#define AXS5106_FAILS_BEFORE_RESET 8
+#define AXS5106_READ_ATTEMPTS 2
+#define AXS5106_RETRY_GAP_MS 3
+
 #define TOUCH_AXS5106_TOUCH_POINTS_REG (0X01)
 #define TOUCH_AXS5106_TOUCH_P1_XH_REG (0x03)
 #define TOUCH_AXS5106_TOUCH_P1_XL_REG (0x04)
@@ -117,6 +130,29 @@ err:
     return ret;
 }
 
+/* Reads with a short retry, and resets the controller when it has stopped
+ * answering altogether. Never returns the stale previous sample: the caller
+ * treats a failure as "no touch", which is what a stuck controller means. */
+static esp_err_t axs5106_read_recovering(esp_lcd_touch_handle_t tp, uint8_t reg, uint8_t *data, uint8_t len)
+{
+    static uint8_t fail_streak;
+
+    for (int attempt = 0; attempt < AXS5106_READ_ATTEMPTS; attempt++) {
+        if (touch_axs5106_i2c_read(tp, reg, data, len) == ESP_OK) {
+            fail_streak = 0;
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(AXS5106_RETRY_GAP_MS));
+    }
+
+    if (++fail_streak >= AXS5106_FAILS_BEFORE_RESET) {
+        fail_streak = 0;
+        ESP_LOGW(TAG, "controller stopped answering: resetting it");
+        ESP_RETURN_ON_ERROR(touch_axs5106_reset(tp), TAG, "reset failed");
+    }
+    return ESP_ERR_TIMEOUT;
+}
+
 static esp_err_t esp_lcd_touch_axs5106_read_data(esp_lcd_touch_handle_t tp)
 {
     esp_err_t err;
@@ -144,7 +180,7 @@ static esp_err_t esp_lcd_touch_axs5106_read_data(esp_lcd_touch_handle_t tp)
         }
     }
 
-    err = touch_axs5106_i2c_read(tp, TOUCH_AXS5106_TOUCH_POINTS_REG, data, 14);
+    err = axs5106_read_recovering(tp, TOUCH_AXS5106_TOUCH_POINTS_REG, data, 14);
     ESP_RETURN_ON_ERROR(err, TAG, "I2C read error!");
     points = data[1];
     points = points & 0x0F;
