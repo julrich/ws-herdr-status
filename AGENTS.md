@@ -457,6 +457,23 @@ Only display + LVGL + touch were exercised. Untested on hardware:
 
 ## 11. This repo: `ws-herdr-status` (desk companion for herdr agent status)
 
+### How to work in this repo
+
+- **Never commit to `main`.** Every new development starts on a branch and is
+  offered for review as a pull request; the maintainer merges. Keep a PR focused
+  on one change.
+- Name branches by intent: `feat/<topic>`, `fix/<topic>`, `docs/<topic>`, and
+  push (`git push -u origin <branch>`) so the PR can be opened against it.
+- Before asking for review: it must build (`make fw-build`) and both host suites
+  must pass (`make ui-test`, `make rotation-test`). Say in the PR what you
+  verified on hardware and what you could not — a panel needs eyes, a touch
+  needs a finger, a turn needs a hand.
+- Never commit generated files: `sdkconfig` (it holds the WiFi password),
+  `build/`, `managed_components/`, compiled test binaries, or the harness's
+  `frame_*.ppm`. `.gitignore` covers the existing ones; ignore a new tool's
+  artefacts in the same commit that adds the tool.
+- `main` is expected to build and to pass both suites at all times.
+
 Two halves, no USB link needed after flashing:
 
 |Path|What it is|
