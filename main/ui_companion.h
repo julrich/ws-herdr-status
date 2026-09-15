@@ -18,11 +18,10 @@ typedef enum {
  * 320x172 (main.c switches the resolution when the device is turned). */
 void ui_companion_create(void);
 
-/* ---- input handlers, called by main/ui_input.c under the LVGL lock ---------
- * They are deliberately plain functions rather than LVGL event callbacks: the
- * touch path is owned by ui_input.c (it is the only place that knows about
- * gesture recognition), which also makes them directly callable from the host
- * harness in tools/ui_host_test. */
+/* ---- input handlers --------------------------------------------------------
+ * The screen's LVGL event callbacks call these (click, long press, gesture), and
+ * the host harness calls them directly — the panel reports one touch, so LVGL's
+ * own event model is the whole input path. */
 
 /* Single tap: refresh from the bridge and play the mood's flourish. */
 void ui_companion_on_tap(void);

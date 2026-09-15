@@ -1,7 +1,6 @@
 idf_component_register(
     SRCS "main.c" "wifi_sta.c" "herdr_client.c" "ui_companion.c"
-         "imu_qmi8658.c" "rotation_logic.c" "ui_rotation.c" "ui_input.c"
-         "touch_gesture.c" "ui_device.c"
+         "imu_qmi8658.c" "rotation_logic.c" "ui_rotation.c" "ui_device.c"
     INCLUDE_DIRS "."
     REQUIRES "esp_bsp" "esp_lcd" "driver" "nvs_flash"
              "esp_wifi" "esp_netif" "esp_event" "esp_http_client" "json"

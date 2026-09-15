@@ -339,6 +339,20 @@ and returning data. Absence of errors over minutes is decent evidence the bus an
 controller are alive. It does not prove the panel reports coordinates; only a
 physical press does.
 
+### One finger, not two
+
+The driver caches the second point (`touchpad_x[1]`/`y[1]`) but on this panel it
+is unreachable, and the way it fails is informative **[verified on this unit]**:
+a 14-byte read of the touch block (`0x01` = count + 2 x 6 bytes, i.e. both
+fingers) is answered with a **data-phase NACK** — `I2C transaction unexpected
+nack detected` — on most attempts, while an 8-byte read (count + one finger)
+succeeds. A NACK *during* the data phase means the address phase ACKed and the
+controller then refused partway, which is what a register window that ends after
+finger 1 looks like. Nothing in the vendor docs, the demo or the product page
+describes this panel as multi-touch. Treat it as single-touch: one finger, and
+LVGL's own click / long-press / gesture events are the whole input vocabulary
+(§11).
+
 `bsp_touch_init` sets `x_max = min(xmax, ymax)` and `y_max = max(xmax, ymax)`
 regardless of rotation. That is correct for portrait, and pairs with
 `swap_xy=1` in landscape — but it is a hard-coded assumption that looks wrong for
@@ -576,26 +590,30 @@ Two halves, no USB link needed after flashing:
 
 ### Touch input, views and the stats source
 
-- **The touch path belongs to `main/ui_input.c`.** An ESP32 cannot see two fingers
-  through LVGL here: the esp_lvgl_port touch indev feeds LVGL a single point
-  (`data->point.x = touchpad_x[0]`), so the input task *removes* that indev
-  (`lvgl_port_remove_touch`), polls the handle itself with two-point reads and
-  dispatches through `ui_companion_on_*`. Re-adding the port's indev would break
-  gestures and fire taps twice.
-- Recognition lives in `main/touch_gesture.c` — pure C, host-tested by
-  `make gesture-test`. Two traps are baked in and must not be undone: travel is
-  tracked **per finger slot, not by the midpoint** (fingers lift a few tens of ms
-  apart, and the midpoint jumps by half the finger separation the moment one
-  leaves), and origins are **re-latched whenever the reported finger count
-  changes** (a controller reports the survivor of a two-finger tap in slot 0 even
-  when it started in slot 1).
+- **LVGL owns the input path.** The panel is single-touch (§7), so the port's own
+  pointer indev is enough: `ui_companion.c`'s `screen_event_cb` maps
+  `LV_EVENT_CLICKED` to a refresh + flourish, `LV_EVENT_LONG_PRESSED` to the
+  diagnostics overlay, and `LV_EVENT_GESTURE` +
+  `lv_indev_get_gesture_dir(lv_indev_get_act())` to view switching (left/right)
+  and paging (up/down). There is no input task, no gesture recogniser of our own
+  and no `lvgl_port_remove_touch` — that whole path existed only to read a second
+  point the controller will not hand over.
+- Two LVGL behaviours the wiring has to absorb, both asserted by `make ui-test`:
+  **CLICKED is sent on release "regardless to long press"** (`lv_event.h`), and
+  **CLICKED is also sent after a gesture** (measured: a swipe's release ran the
+  tap path, which showed up as an unexpected flourish in the stats view). A long
+  press and a gesture each set a flag that suppresses the click, and the harness
+  asserts both by counting bridge polls — `0` after a long press and after a
+  swipe, `1` after a real tap.
+- The screen carries `LV_OBJ_FLAG_CLICKABLE`; the view containers above it stay
+  `make_passive`d, so the press and the gesture are delivered to the screen.
 - The two views are two `lv_obj` containers, both children of the single screen,
   each at the origin so children keep the coordinates they were written with;
   switching is one hidden flag. Do not turn them into separate LVGL screens:
   main.c's rotation path auto-deletes the old screen, so a second screen's stored
   pointer would dangle.
-- The diagnostics overlay is created on demand and deleted on the next two-finger
-  tap; `ui_companion_create()` clears those pointers because they die with the
+- The diagnostics overlay is created on demand and deleted on the next long
+  press; `ui_companion_create()` clears those pointers because they die with the
   screen.
 - **Stats come from the agents' own session logs**, not from herdr: herdr exposes
   only the session *path* (`agent_session.kind == "path"`), while the omp jsonl

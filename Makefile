@@ -11,7 +11,7 @@
 IDF_EXPORT ?= $(HOME)/esp/esp-idf/export.sh
 
 .PHONY: bridge bridge-once bridge-service-install bridge-service-status \
-        fw-build fw-flash fw-monitor ui-test rotation-test gesture-test
+        fw-build fw-flash fw-monitor ui-test rotation-test
 
 bridge:
 	@python3 bridge/herdr_status_bridge.py
@@ -39,6 +39,3 @@ ui-test:
 
 rotation-test:
 	@bash tools/rotation_test/run.sh
-
-gesture-test:
-	@bash tools/gesture_test/run.sh

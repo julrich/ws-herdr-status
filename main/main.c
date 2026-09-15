@@ -23,7 +23,6 @@
 #include "bsp_touch.h"
 #include "herdr_client.h"
 #include "ui_companion.h"
-#include "ui_input.h"
 #include "ui_rotation.h"
 #include "wifi_sta.h"
 
@@ -51,14 +50,12 @@ static esp_lcd_panel_handle_t s_panel;
 static esp_lcd_touch_handle_t s_touch;
 static i2c_master_bus_handle_t s_i2c;
 static lv_display_t *s_disp;
-static lv_indev_t *s_touch_indev;
 static int s_rotation;
 
 i2c_master_bus_handle_t app_hw_i2c(void) { return s_i2c; }
 esp_lcd_panel_handle_t  app_hw_panel(void) { return s_panel; }
 esp_lcd_touch_handle_t  app_hw_touch(void) { return s_touch; }
 lv_display_t           *app_hw_disp(void) { return s_disp; }
-lv_indev_t             *app_hw_touch_indev(void) { return s_touch_indev; }
 int                     app_rotation(void) { return s_rotation; }
 
 /* The vendor's table for this panel (AGENTS.md §5) and its touch driver (§7).
@@ -172,12 +169,10 @@ static esp_err_t lvgl_start(void)
         .disp = disp,
         .handle = s_touch,
     };
-    /* Keep the indev: ui_input_start() removes it. The touch task reads both of
-     * the controller's points itself, and this indev would compete with it for
-     * the driver's latched sample; removing it is also what frees its memory
-     * (lvgl_port_add_touch()'s note says nothing else does). */
-    s_touch_indev = lvgl_port_add_touch(&touch_cfg);
-    ESP_RETURN_ON_FALSE(s_touch_indev != NULL, ESP_FAIL, TAG, "lvgl_port_add_touch failed");
+    /* The port's own pointer indev is the whole input path: this panel reports a
+     * single touch, so LVGL's click / long-press / gesture events cover the
+     * companion's vocabulary (AGENTS.md §11). */
+    ESP_RETURN_ON_FALSE(lvgl_port_add_touch(&touch_cfg) != NULL, ESP_FAIL, TAG, "lvgl_port_add_touch failed");
 
     return ESP_OK;
 }
@@ -209,7 +204,6 @@ void app_main(void)
      * IMU take over. app_apply_rotation() creates the screen itself. */
     app_apply_rotation(ui_rotation_restore());
     ui_rotation_start();
-    ui_input_start();
 
     /* Light the backlight only after the first frame has been pushed out, so
      * the uninitialised GRAM is never visible. */

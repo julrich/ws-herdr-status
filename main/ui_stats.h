@@ -8,7 +8,6 @@
  * Producers:
  *   - herdr_client_stats()   — the HTTP poller            (main/herdr_client.c)
  *   - ui_rotation_stats_get() — the IMU/rotation task      (main/ui_rotation.c)
- *   - ui_input_stats_get()   — the touch/gesture task      (main/ui_input.c)
  */
 #pragma once
 
@@ -37,18 +36,6 @@ typedef struct {
     bool     calibrated;
 } herdr_imu_stats_t;
 
-/* Touch and gesture activity, as the input task sees it. */
-typedef struct {
-    bool     running;      /* the input task is alive */
-    uint32_t polls;        /* touch samples taken since boot */
-    uint32_t read_errors;  /* touch reads that failed */
-    uint32_t taps;         /* one-finger taps */
-    uint32_t taps2;        /* two-finger taps */
-    uint32_t swipes;       /* one-finger swipes, any direction */
-    uint32_t ignored;      /* gestures deliberately not acted on */
-    bool     touching;     /* a finger is down right now */
-} herdr_input_stats_t;
-
 /* Free heap in bytes, and its low-water mark since boot. 0 where the platform
  * does not provide them (the host harness), which the overlay renders as n/a. */
 uint32_t ui_device_free_heap(void);
@@ -56,4 +43,3 @@ uint32_t ui_device_min_free_heap(void);
 
 void herdr_client_stats(herdr_link_stats_t *out);
 void ui_rotation_stats_get(herdr_imu_stats_t *out);
-void ui_input_stats_get(herdr_input_stats_t *out);

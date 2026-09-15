@@ -402,7 +402,9 @@ static lv_obj_t *s_overlay;       /* diagnostics panel, created on demand */
 static lv_obj_t *s_overlay_text;
 static lv_obj_t *s_stats_title;
 static lv_obj_t *s_stats_txt[STATS_LINES];
-static uint32_t  s_taps;
+static uint32_t  s_taps;      /* interaction counters, shown by the overlay */
+static uint32_t  s_longs;
+static uint32_t  s_swipes;
 static uint32_t  s_flourish_count;
 static int       s_stats_page;    /* the stats view has two pages of its own */
 static int       s_stats_pages;
@@ -1140,14 +1142,12 @@ static void ui_overlay_render(void)
         return;
     }
 
-    herdr_link_stats_t  link = { 0 };
-    herdr_imu_stats_t   imu  = { 0 };
-    herdr_input_stats_t in   = { 0 };
-    herdr_status_t      s    = { 0 };
+    herdr_link_stats_t link = { 0 };
+    herdr_imu_stats_t  imu  = { 0 };
+    herdr_status_t     s    = { 0 };
 
     herdr_client_stats(&link);
     ui_rotation_stats_get(&imu);
-    ui_input_stats_get(&in);
     const bool have = herdr_client_get(&s);
 
     lv_mem_monitor_t mon;
@@ -1167,9 +1167,8 @@ static void ui_overlay_render(void)
              "imu     %u Hz  err %u\n"
              "axis    %d %s%c  %s\n"
              "rot     %d  %dx%d\n"
-             "touch   %u p %u e\n"
-             "gest    %u/%u/%u/%u\n"
-             "view    %s  taps %u",
+             "input   tap %u  long %u\n"
+             "        swipe %u  view %s",
              (unsigned)(up / 3600), (unsigned)((up / 60) % 60), (unsigned)(up % 60),
              (unsigned)(ui_device_free_heap() / 1024), (unsigned)(ui_device_min_free_heap() / 1024),
              (unsigned)mon.used_pct, (unsigned)mon.frag_pct,
@@ -1181,9 +1180,8 @@ static void ui_overlay_render(void)
              (int)imu.axis, imu.calibrated ? "cal" : "raw",
              (imu.sign > 0) ? '+' : '-', imu.present ? "ok" : "gone",
              SPLIT ? 1 : 0, SCR_W, SCR_H,
-             (unsigned)in.polls, (unsigned)in.read_errors,
-             (unsigned)in.taps, (unsigned)in.taps2, (unsigned)in.swipes, (unsigned)in.ignored,
-             ui_view_name(s_view), (unsigned)s_taps);
+             (unsigned)s_taps, (unsigned)s_longs,
+             (unsigned)s_swipes, ui_view_name(s_view));
 
     lv_label_set_text(s_overlay_text, buf);
 }
@@ -1223,13 +1221,11 @@ static void stats_line(int idx, const char *fmt, ...)
 
 static void ui_stats_render(void)
 {
-    herdr_link_stats_t  link = { 0 };
-    herdr_imu_stats_t   imu  = { 0 };
-    herdr_input_stats_t in   = { 0 };
+    herdr_link_stats_t link = { 0 };
+    herdr_imu_stats_t  imu  = { 0 };
 
     herdr_client_stats(&link);
     ui_rotation_stats_get(&imu);
-    ui_input_stats_get(&in);
 
     herdr_status_t   s = { 0 };
     const bool       have = herdr_client_get(&s);
@@ -1249,7 +1245,7 @@ static void ui_stats_render(void)
         stats_line(7, " imu %u Hz  %s", (unsigned)imu.rate_hz, imu.calibrated ? "calibrated" : "raw");
         stats_line(8, " ax %d %c  err %u", (int)imu.axis, (imu.sign > 0) ? '+' : '-', (unsigned)imu.errors);
         stats_line(9, " rot %s  %dx%d", SPLIT ? "land" : "port", SCR_W, SCR_H);
-        stats_line(10, " touch %u  tap %u/%u", (unsigned)in.polls, (unsigned)in.taps, (unsigned)in.taps2);
+        stats_line(10, " in %u tap  %u swipe", (unsigned)s_taps, (unsigned)s_swipes);
         s_stats_pages = 2;
         return;
     }
@@ -1622,13 +1618,61 @@ static void ui_tick(lv_timer_t *timer)
 
 /* ---- tap ---------------------------------------------------------------- */
 
-/* Called by main/ui_input.c when the gesture recogniser sees a single tap, so it
- * runs in the input task under the LVGL lock. The screen's own LV_EVENT_CLICKED
- * wiring is gone: the port's touch indev is removed there, which means LVGL never
- * sees a touch at all — this handler is the only tap path. */
+/* One press, three meanings — the whole input vocabulary of this panel, taken
+ * straight from LVGL's pointer events rather than from a reader of our own:
+ *
+ *   click        refresh from the bridge and play the mood's flourish
+ *   long press   raise or drop the diagnostics overlay
+ *   swipe        left/right switches view, up/down pages
+ *
+ * LVGL fires CLICKED on release "regardless to long press" (lv_event.h), so both
+ * a long press and a swipe are remembered here and keep their release from also
+ * reading as a tap. */
+static bool s_long_fired;
+static bool s_gesture_fired;
+
+static void screen_event_cb(lv_event_t *e)
+{
+    switch (lv_event_get_code(e)) {
+    case LV_EVENT_PRESSED:
+        s_long_fired    = false;
+        s_gesture_fired = false;
+        break;
+    case LV_EVENT_LONG_PRESSED:
+        s_long_fired = true;
+        s_longs++;
+        ui_companion_on_toggle_overlay();
+        break;
+    case LV_EVENT_CLICKED:
+        if (!s_long_fired && !s_gesture_fired) {
+            ui_companion_on_tap();
+        }
+        break;
+    case LV_EVENT_GESTURE: {
+        /* lv_event.h: "A gesture is detected. Get the gesture with
+         * lv_indev_get_gesture_dir(lv_indev_get_act())". */
+        const lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
+
+        s_gesture_fired = true;
+        if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
+            s_swipes++;
+            ui_companion_on_switch_view(dir == LV_DIR_RIGHT ? 1 : -1);
+        } else if (dir == LV_DIR_TOP || dir == LV_DIR_BOTTOM) {
+            s_swipes++;
+            ui_companion_on_page(dir == LV_DIR_BOTTOM ? 1 : -1);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/* The screen's click handler (see screen_event_cb). */
 void ui_companion_on_tap(void)
 {
-    s_taps++;
+    s_taps++;  /* kept here rather than in the event callback so the harness's
+                * direct calls are counted too */
     herdr_client_poll_now();
     ui_flourish_start();
 
@@ -1661,6 +1705,8 @@ void ui_companion_create(void)
     ui_layout_init(lv_obj_get_width(scr), lv_obj_get_height(scr));
 
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(scr, LV_OBJ_FLAG_CLICKABLE); /* press/gesture land here */
+    lv_obj_add_event_cb(scr, screen_event_cb, LV_EVENT_ALL, NULL);
     lv_obj_set_style_bg_color(scr, lv_color_hex(COL_BG), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(scr, 0, 0);
@@ -1836,6 +1882,7 @@ void ui_companion_create(void)
 
     /* A rebuilt screen starts on the companion view, page one, no overlay: those
      * pointers all died with the previous screen. */
+    s_long_fired   = false;
     s_view         = UI_VIEW_MOOD;
     s_page         = 0;
     s_stats_page   = 0;

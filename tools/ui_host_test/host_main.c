@@ -115,7 +115,6 @@ void herdr_client_poll_now(void)
  * ui_input.c, ui_device.c); here they are plain settable state. */
 static herdr_link_stats_t  g_link;
 static herdr_imu_stats_t   g_imu;
-static herdr_input_stats_t g_input;
 static herdr_sessions_t    g_sessions;
 
 void herdr_client_stats(herdr_link_stats_t *out)
@@ -126,11 +125,6 @@ void herdr_client_stats(herdr_link_stats_t *out)
 void ui_rotation_stats_get(herdr_imu_stats_t *out)
 {
     if(out != NULL) *out = g_imu;
-}
-
-void ui_input_stats_get(herdr_input_stats_t *out)
-{
-    if(out != NULL) *out = g_input;
 }
 
 bool herdr_stats_get(herdr_sessions_t *out)
@@ -186,6 +180,25 @@ static void post_press(int x, int y)
 static void post_release(void)
 {
     g_ptr_state = LV_INDEV_STATE_REL;
+}
+
+static void render(int iterations);
+
+/* Drag the scripted pointer, one tick per step. LVGL decides a gesture from the
+ * travel distance and the velocity across reads (LV_INDEV_DEF_GESTURE_LIMIT,
+ * LV_INDEV_DEF_GESTURE_MIN_VELOCITY), so a single jump would not register. */
+static void drag(int x0, int y0, int x1, int y1, int steps)
+{
+    post_press(x0, y0);
+    render(1);                       /* LVGL latches the press */
+
+    for (int i = 1; i <= steps; i++) {
+        post_press(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps);
+        render(1);
+    }
+
+    post_release();
+    render(2);
 }
 
 static void indev_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
@@ -316,7 +329,6 @@ static void load_scenario(const char *name)
     memset(&g_status, 0, sizeof g_status);
     memset(&g_link, 0, sizeof g_link);
     memset(&g_imu, 0, sizeof g_imu);
-    memset(&g_input, 0, sizeof g_input);
     memset(&g_sessions, 0, sizeof g_sessions);
 
     g_link.gen      = 17285;
@@ -329,9 +341,6 @@ static void load_scenario(const char *name)
     g_imu.axis      = 1;
     g_imu.sign      = -1;
     g_imu.calibrated = true;
-    g_input.running = true;
-    g_input.polls   = 512;
-
     g_status.online = true;
     g_status.stale  = false;
     g_status.gen    = ++s_gen;
@@ -825,18 +834,13 @@ static void check_overflow(result_t *r)
 
 static void check_tap(result_t *r)
 {
-    /* Exercise the scripted pointer path first: press and release through the
-     * indev, which the device would deliver to ui_input.c rather than to LVGL. */
+    /* Press and release through the scripted pointer: LVGL's own click handling
+     * is the only path a tap takes on the device, so it is the path under test. */
+    g_poll_now_calls = 0;
     post_press(BODY_CX, BODY_CY);
     render(3);
     post_release();
-    render(3);
-
-    /* The tap handler is what the gesture recogniser calls (ui_input.c), so the
-     * harness calls it directly - that is the whole path on the device. */
-    g_poll_now_calls = 0;
-    ui_companion_on_tap();
-    render(4); /* ~120 ms: the squash is at its deepest */
+    render(4);
 
     EXPECT(r, g_poll_now_calls == 1,
            "herdr_client_poll_now calls = %d (want 1)", g_poll_now_calls);
@@ -885,23 +889,24 @@ static void check_view_switch(result_t *r)
     EXPECT(r, assert_text(0, 30, "WORKING", got, sizeof got),
            "mood view headline want \"WORKING\" got \"%s\"", got);
 
-    ui_companion_on_switch_view(1);
-    render(4);
+    g_poll_now_calls = 0;
+    drag(BODY_CX + 60, BODY_CY, BODY_CX - 60, BODY_CY, 4);   /* swipe left */
 
     EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "swipe left gave view %s", ui_view_name(ui_companion_view()));
+    /* A swipe is not a tap, so it must not refresh from the bridge either. */
+    EXPECT(r, g_poll_now_calls == 0,
+           "a swipe also read as a tap (%d bridge polls)", g_poll_now_calls);
     EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_BG),
            "the face is still drawn in the stats view (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
     EXPECT(r, assert_text(0, 30, "STATS", got, sizeof got),
            "stats view title want \"STATS\" got \"%s\"", got);
 
-    ui_companion_on_switch_view(1); /* two views, so this wraps back */
-    render(4);
+    drag(BODY_CX + 60, BODY_CY, BODY_CX - 60, BODY_CY, 4);   /* two views: wraps back */
     EXPECT(r, ui_companion_view() == UI_VIEW_MOOD, "wrapping gave view %s", ui_view_name(ui_companion_view()));
     EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
            "the face did not come back (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
 
-    ui_companion_on_switch_view(-1);
-    render(4);
+    drag(BODY_CX - 60, BODY_CY, BODY_CX + 60, BODY_CY, 4);   /* swipe right */
     EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "swipe right from mood gave view %s",
            ui_view_name(ui_companion_view()));
 }
@@ -916,8 +921,7 @@ static void check_paging(result_t *r)
     EXPECT(r, assert_text(LIST_Y0 + 3 * LIST_ROW_H + 2, LIST_Y0 + 3 * LIST_ROW_H + 15, "Delta", got, sizeof got),
            "page 1 row 4 want \"Delta\" got \"%s\"", got);
 
-    ui_companion_on_page(1);
-    render(4);
+    drag(BODY_CX, BODY_CY + 40, BODY_CX, BODY_CY - 40, 4);   /* swipe up */
 
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "Echo", got, sizeof got),
            "page 2 row 1 want \"Echo\" got \"%s\"", got);
@@ -926,8 +930,7 @@ static void check_paging(result_t *r)
     EXPECT(r, assert_text_suffix(SUMMARY_Y_MIN, SUMMARY_Y_MAX, " p2/2", got, sizeof got),
            "summary want a page marker \" p2/2\" got \"%s\"", got);
 
-    ui_companion_on_page(1); /* wraps back to page 1 */
-    render(4);
+    drag(BODY_CX, BODY_CY + 40, BODY_CX, BODY_CY - 40, 4);   /* wraps back to page 1 */
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "> Alpha", got, sizeof got),
            "wrapping the list gave row 1 \"%s\"", got);
 }
@@ -938,16 +941,30 @@ static void check_overlay(result_t *r)
     EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
            "no face before the overlay (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
 
-    ui_companion_on_toggle_overlay();
+    /* Hold a finger down past LVGL's long-press time (LV_INDEV_DEF_LONG_PRESS_TIME,
+     * 400 ms at this 30 ms tick), then let go. */
+    g_poll_now_calls = 0;
+    post_press(BODY_CX, BODY_CY);
+    render(20);
+    post_release();
     render(4);
+
     /* The panel is a 94%-opaque wash of COL_BG, so the face must be gone even
      * though the exact pixel is no longer the bare background colour. */
     EXPECT(r, pixel_at(BODY_CX, BODY_CY) != expect_rgb(COL_WORKING),
-           "two-finger tap did not raise the overlay (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
+           "long press did not raise the overlay (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
     EXPECT(r, pixel_at(BODY_CX, BODY_CY) < 0x202020u,
            "the overlay is not dark (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
 
-    ui_companion_on_toggle_overlay();
+    /* LVGL sends CLICKED on release "regardless to long press" (lv_event.h), and
+     * a click would refresh from the bridge. It must not: the press was a long
+     * press, and only a real tap is a tap. */
+    EXPECT(r, g_poll_now_calls == 0,
+           "a long press also read as a tap (%d bridge polls)", g_poll_now_calls);
+
+    post_press(BODY_CX, BODY_CY);   /* a second long press drops it again */
+    render(20);
+    post_release();
     render(4);
     EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
            "the overlay did not come down (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
