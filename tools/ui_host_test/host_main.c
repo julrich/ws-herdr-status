@@ -385,11 +385,11 @@ static void load_scenario(const char *name)
         set_agent(3, "tsnm", "omp",       HERDR_ST_IDLE,    false);
         g_status.count = 4;
 
-        static const struct { uint32_t in, out, calls, msgs, age; } live[4] = {
-            { 322361294u, 723439u,  804,  790,     6 },
-            { 522287761u, 990343u, 1280, 1142,  9602 },
-            {  14171410u, 159329u,  173,  101,  8057 },
-            { 239267051u, 463330u,  735,  538, 103149 },
+        static const struct { uint32_t in, out, calls, msgs, age, cost; } live[4] = {
+            { 322361294u, 723439u,  804,  790,     6, 4564666u },   /* $4.56 */
+            { 522287761u, 990343u, 1280, 1142,  9602, 5376479u },   /* $5.38 */
+            {  14171410u, 159329u,  173,  101,  8057,  302797u },   /* $0.30 */
+            { 239267051u, 463330u,  735,  538, 103149, 2358504u },  /* $2.36 */
         };
 
         g_sessions.valid      = true;
@@ -399,6 +399,7 @@ static void load_scenario(const char *name)
         g_sessions.messages   = 2567;
         g_sessions.tool_calls = 2988;
         g_sessions.age_s      = 11;
+        g_sessions.cost_micro = 12745891u;   /* $12.75 across the four */
 
         for(int i = 0; i < 4; i++) {
             g_sessions.per[i].tokens_in  = live[i].in;
@@ -406,6 +407,7 @@ static void load_scenario(const char *name)
             g_sessions.per[i].tool_calls = live[i].calls;
             g_sessions.per[i].messages   = live[i].msgs;
             g_sessions.per[i].age_s      = live[i].age;
+            g_sessions.per[i].cost_micro = live[i].cost;
             snprintf(g_sessions.per[i].model, sizeof g_sessions.per[i].model, "deepseek-v4.1-f");
         }
     }
@@ -540,13 +542,95 @@ static lv_obj_t *find_label_at(int y_min, int y_max)
 }
 
 /* Exact-string comparison of the label living in a y band; fills `got`. */
+/* Any label in the band carrying exactly this text. A stats row holds two labels (a
+ * left column and a right-aligned figure), so matching the band's first label would
+ * depend on which happened to be created first. */
+static bool assert_text_in(lv_obj_t *obj, int y_min, int y_max, const char *expected)
+{
+    uint32_t n = lv_obj_get_child_cnt(obj);
+
+    for(uint32_t i = 0; i < n; i++) {
+        lv_obj_t *child = lv_obj_get_child(obj, (int32_t)i);
+        if(child == NULL) continue;
+        if(lv_obj_check_type(child, &lv_label_class) && obj_is_visible(child)) {
+            lv_area_t a;
+            lv_obj_get_coords(child, &a);
+            if(a.y1 >= y_min && a.y1 <= y_max && strcmp(lv_label_get_text(child), expected) == 0) {
+                return true;
+            }
+        }
+        if(assert_text_in(child, y_min, y_max, expected)) return true;
+    }
+    return false;
+}
+
+/* Collects the label boxes whose top edge falls in the band. A stats row has two:
+ * the left column and the right-aligned figure. */
+static void band_boxes(lv_obj_t *obj, int y_min, int y_max, lv_area_t *box, int *n, int max)
+{
+    uint32_t cnt = lv_obj_get_child_cnt(obj);
+
+    for(uint32_t i = 0; i < cnt; i++) {
+        lv_obj_t *child = lv_obj_get_child(obj, (int32_t)i);
+        if(child == NULL) continue;
+
+        if(lv_obj_check_type(child, &lv_label_class) && obj_is_visible(child)) {
+            lv_area_t a;
+            lv_obj_get_coords(child, &a);
+            if(a.y1 >= y_min && a.y1 <= y_max && *n < max) {
+                box[(*n)++] = a;
+            }
+        }
+        band_boxes(child, y_min, y_max, box, n, max);
+    }
+}
+
+/* The two columns of a stats row must not run into each other, and the right one has
+ * to stay on screen. LVGL does not clip a label, so an over-long string silently
+ * overlaps its neighbour: comparing the boxes is the only way to catch it. Reports
+ * the gap and the right edge, so a failure says how much has to be trimmed. */
+static bool assert_columns(int y_min, int y_max, int min_gap, char *why, size_t why_sz)
+{
+    lv_obj_t  *scr = lv_scr_act();
+    lv_area_t  box[4];
+    int        n = 0, gap = -1, edge = 0;
+
+    if(scr == NULL) {
+        snprintf(why, why_sz, "no screen");
+        return false;
+    }
+
+    band_boxes(scr, y_min, y_max, box, &n, 4);
+
+    if(n >= 2) {
+        /* Leftmost is the label column, rightmost the figure column. */
+        lv_area_t left = box[0], right = box[0];
+        for(int i = 1; i < n; i++) {
+            if(box[i].x1 < left.x1)   left  = box[i];
+            if(box[i].x2 > right.x2)  right = box[i];
+        }
+        gap  = right.x1 - left.x2;
+        edge = right.x2;
+    }
+
+    snprintf(why, why_sz, "gap=%d px, right edge=%d (screen %d)", gap, edge, g_w);
+    return gap >= min_gap && edge <= g_w - 4;
+}
+
 static bool assert_text(int y_min, int y_max, const char *expected, char *got, size_t got_sz)
 {
+    lv_obj_t *scr = lv_scr_act();
+
+    if(scr != NULL && assert_text_in(scr, y_min, y_max, expected)) {
+        snprintf(got, got_sz, "%s", expected);
+        return true;
+    }
+
     lv_obj_t   *lbl = find_label_at(y_min, y_max);
     const char *txt = (lbl != NULL) ? lv_label_get_text(lbl) : NULL;
     if(txt == NULL) txt = "(no label)";
     snprintf(got, got_sz, "%s", txt);
-    return strcmp(txt, expected) == 0;
+    return false;
 }
 
 static bool assert_text_suffix(int y_min, int y_max, const char *suffix, char *got, size_t got_sz)
@@ -949,8 +1033,8 @@ static void check_view_switch(result_t *r)
            "a double tap on the face wanted 1 bridge poll, got %d", g_poll_now_calls);
     EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_BG),
            "the face is still drawn in the stats view (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
-    EXPECT(r, assert_text(0, 30, "STATS", got, sizeof got),
-           "stats view title want \"STATS\" got \"%s\"", got);
+    EXPECT(r, assert_text(0, 30, "STATS  1/2", got, sizeof got),
+           "stats view title want \"STATS  1/2\" (it marks the page) got \"%s\"", got);
 
     double_click_at(FACE_HALF_X, FACE_HALF_Y);   /* two views: the next double wraps back */
     render(30);                                  /*  as above: settle the flourish */
@@ -968,45 +1052,94 @@ static void check_view_switch(result_t *r)
  * scenario existed nothing asserted it at all. The numbers are the desk's own, at
  * the magnitudes that made the view unreadable before the G tier and the h/d
  * ages: a billion tokens printed as "1097.1M", an overnight session as "9602s". */
+/* The stats view: the only place the session figures appear, and now a two-column
+ * table rather than one long line per row. The numbers are the desk's own, at the
+ * magnitudes that made the view unreadable before the G tier and the h/d ages.
+ *
+ * Page one is the sessions (tokens and money are what the view is opened for) and
+ * page two is the link and the device; a tap on the list's half pages between them. */
 static void check_stats(result_t *r)
 {
     char got[64];
 
     double_click_at(FACE_HALF_X, FACE_HALF_Y);   /* double tap into the stats view */
+    render(30);                                  /* and let its flourish finish */
     EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "double tap gave view %s",
            ui_view_name(ui_companion_view()));
 
-    /* Page one is link and device: the same numbers the long-press overlay shows. */
-    EXPECT(r, assert_text(0, 30, "STATS", got, sizeof got),
-           "stats title want \"STATS\" got \"%s\"", got);
-    EXPECT(r, assert_text(STATS_Y0, STATS_Y0 + 6, "LINK", got, sizeof got),
-           "page 1 line 0 want \"LINK\" got \"%s\"", got);
+    EXPECT(r, assert_text(0, 30, "STATS  1/2", got, sizeof got),
+           "page marker want \"STATS  1/2\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0, STATS_Y0 + 6, "SESSIONS", got, sizeof got),
+           "first page section header want \"SESSIONS\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0, STATS_Y0 + 6, "4", got, sizeof got),
+           "the session count want \"4\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0 + STATS_ROW_H, STATS_Y0 + STATS_ROW_H + 6,
+                          "1.0G in  2.3M out", got, sizeof got),
+           "tokens row want \"1.0G in  2.3M out\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0 + 2 * STATS_ROW_H, STATS_Y0 + 2 * STATS_ROW_H + 6,
+                          "2988 calls  2567 msg", got, sizeof got),
+           "activity row want \"2988 calls  2567 msg\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0 + 3 * STATS_ROW_H, STATS_Y0 + 3 * STATS_ROW_H + 6,
+                          "$12.75", got, sizeof got),
+           "the spend figure want \"$12.75\" — rounded, not truncated — got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0 + 4 * STATS_ROW_H, STATS_Y0 + 4 * STATS_ROW_H + 6,
+                          "AGENTS", got, sizeof got),
+           "the rows' header want \"AGENTS\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0 + 5 * STATS_ROW_H, STATS_Y0 + 5 * STATS_ROW_H + 6,
+                          "Waveshare 322.3M", got, sizeof got),
+           "first row want \"Waveshare 322.3M\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0 + 5 * STATS_ROW_H, STATS_Y0 + 5 * STATS_ROW_H + 6,
+                          "$4.56", got, sizeof got),
+           "first row's cost want \"$4.56\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0 + 6 * STATS_ROW_H, STATS_Y0 + 6 * STATS_ROW_H + 6,
+                          "rm Upgrad 522.2M", got, sizeof got),
+           "second row (9-char label) want \"rm Upgrad 522.2M\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0 + 6 * STATS_ROW_H, STATS_Y0 + 6 * STATS_ROW_H + 6,
+                          "$5.38", got, sizeof got),
+           "second row's cost want \"$5.38\" got \"%s\"", got);
 
-    /* Page two is the sessions, one tap on the list's half away — deferred by the
-     * double window like every list tap. */
+    /* No column may run into its neighbour: the longest left string against the
+     * widest figure is what decides the row width. */
+    EXPECT(r, assert_columns(STATS_Y0 + 5 * STATS_ROW_H, STATS_Y0 + 5 * STATS_ROW_H + 6, 6, got, sizeof got),
+           "the widest agent row's columns collide (%s)", got);
+    EXPECT(r, assert_columns(STATS_Y0 + STATS_ROW_H, STATS_Y0 + STATS_ROW_H + 6, 6, got, sizeof got),
+           "the tokens row's columns collide (%s)", got);
+    EXPECT(r, assert_columns(STATS_Y0 + 2 * STATS_ROW_H, STATS_Y0 + 2 * STATS_ROW_H + 6, 6, got, sizeof got),
+           "the activity row's columns collide (%s)", got);
+
+    /* Four agents fill four row lines; the rest must be clear rather than carrying
+     * whatever the page before had there. That leak is what this guards. */
+    EXPECT(r, assert_text(STATS_Y0 + 9 * STATS_ROW_H, STATS_Y0 + 9 * STATS_ROW_H + 6, "", got, sizeof got),
+           "line 10 of the sessions page should be empty, got \"%s\"", got);
+
+    /* Page two: the link and the device, one tap on the list's half away — deferred
+     * by the double window, like every list tap. */
     click_at(LIST_HALF_X, LIST_HALF_Y);
     render(20);
 
-    EXPECT(r, assert_text(STATS_Y0, STATS_Y0 + 6, "SESS 4   1.0G in", got, sizeof got),
-           "session totals want \"SESS 4   1.0G in\" got \"%s\"", got);
-    EXPECT(r, assert_text(STATS_Y0 + STATS_ROW_H, STATS_Y0 + STATS_ROW_H + 6,
-                          "out 2.3M  msg 2567", got, sizeof got),
-           "output/messages want \"out 2.3M  msg 2567\" got \"%s\"", got);
-    EXPECT(r, assert_text(STATS_Y0 + 2 * STATS_ROW_H, STATS_Y0 + 2 * STATS_ROW_H + 6,
-                          "calls 2988  last 11s", got, sizeof got),
-           "calls/age want \"calls 2988  last 11s\" got \"%s\"", got);
-    EXPECT(r, assert_text(STATS_Y0 + 3 * STATS_ROW_H, STATS_Y0 + 3 * STATS_ROW_H + 6,
-                          "Waveshare 322.3M 804c", got, sizeof got),
-           "first session row want \"Waveshare 322.3M 804c\" got \"%s\"", got);
-    EXPECT(r, assert_text(STATS_Y0 + 4 * STATS_ROW_H, STATS_Y0 + 4 * STATS_ROW_H + 6,
-                          "rm Upgrad 522.2M 1280c", got, sizeof got),
-           "second session row (9-char label) want \"rm Upgrad 522.2M 1280c\" got \"%s\"", got);
+    EXPECT(r, assert_text(0, 30, "STATS  2/2", got, sizeof got),
+           "second page marker want \"STATS  2/2\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0, STATS_Y0 + 6, "LINK", got, sizeof got),
+           "second page section header want \"LINK\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0 + STATS_ROW_H, STATS_Y0 + STATS_ROW_H + 6, "gen", got, sizeof got),
+           "link row label want \"gen\" got \"%s\"", got);
+    EXPECT(r, assert_text(STATS_Y0 + STATS_ROW_H, STATS_Y0 + STATS_ROW_H + 6, "17285", got, sizeof got),
+           "the link row's figure want \"17285\" got \"%s\"", got);
+    EXPECT(r, assert_columns(STATS_Y0 + 9 * STATS_ROW_H, STATS_Y0 + 9 * STATS_ROW_H + 6, 6, got, sizeof got),
+           "the widest device row's columns collide (%s)", got);
 
-    /* The link/device page fills all eleven lines, the sessions page only seven:
-     * anything still showing below the rows is the previous page bleeding through
-     * (seen on the panel render as the IMU and rotation lines under the sessions). */
-    EXPECT(r, assert_text(STATS_Y0 + 7 * STATS_ROW_H, STATS_Y0 + 7 * STATS_ROW_H + 6, "", got, sizeof got),
-           "line 8 of the sessions page should be empty, got \"%s\"", got);
+    /* ...and the session rows must not still be drawn underneath it. */
+    EXPECT(r, assert_text(STATS_Y0 + 5 * STATS_ROW_H, STATS_Y0 + 5 * STATS_ROW_H + 6,
+                          "Waveshare 322.3M", got, sizeof got) == false,
+           "the sessions rows are still on the link page (\"%s\")", got);
+
+    /* Back to the sessions page: the check leaves the frame it writes showing the
+     * page someone actually opens the view for. */
+    click_at(LIST_HALF_X, LIST_HALF_Y);
+    render(20);
+    EXPECT(r, assert_text(STATS_Y0 + 3 * STATS_ROW_H, STATS_Y0 + 3 * STATS_ROW_H + 6,
+                          "$12.75", got, sizeof got),
+           "paging back lost the spend figure (got \"%s\")", got);
 }
 
 /* Six agents, four rows: a vertical swipe has to page the list. */

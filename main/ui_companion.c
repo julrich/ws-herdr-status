@@ -401,7 +401,22 @@ static lv_obj_t *s_stats_cont;    /* holds the stats view */
 static lv_obj_t *s_overlay;       /* diagnostics panel, created on demand */
 static lv_obj_t *s_overlay_text;
 static lv_obj_t *s_stats_title;
+/* The stats view is a two-column table: a label on the left, a figure on the right,
+ * a hairline under each section header, and a status dot in front of every session
+ * row. The right column is a separate label because the fonts here are not
+ * monospaced — padding with spaces would not line anything up. */
+#define STATS_DOT_D  6
+#define STATS_ROWS   (STATS_LINES - 5)   /* a header, three totals, a header, then rows */
+#define STATS_X_LEFT (SPLIT ? HEADLINE_X : 10)
+#define STATS_TEXT_X (SPLIT ? HEADLINE_X + 12 : 22)   /* body lines that carry a dot */
+#define STATS_DOT_X  (SPLIT ? HEADLINE_X : 10)
+#define STATS_ROW_Y(i) (HEADLINE_Y + 20 + (i) * (SPLIT ? 12 : 14))
+
 static lv_obj_t *s_stats_txt[STATS_LINES];
+static lv_obj_t *s_stats_val[STATS_LINES];   /* right column, right-aligned */
+static lv_obj_t *s_stats_rule[2];            /* hairline under a section header */
+static lv_obj_t *s_stats_dot[STATS_ROWS];    /* one per session row */
+
 static uint32_t  s_taps;      /* interaction counters, shown by the overlay */
 static uint32_t  s_longs;
 static uint32_t  s_doubles;
@@ -1241,6 +1256,89 @@ static void stats_line(int idx, const char *fmt, ...)
     lv_label_set_text(s_stats_txt[idx], buf);
 }
 
+/* Defined with the mood view's list; the session rows use the same colours. */
+static uint32_t state_colour(herdr_agent_state_t st);
+
+/* Micro-dollars as money. Integer arithmetic throughout: a float here would be
+ * slower on this chip and could print $4.55 where the figure is $4.56. */
+static void fmt_cost(char *buf, size_t n, uint32_t micro)
+{
+    /* Round to cents before splitting dollars off, so $12.7459 reads $12.75 rather
+     * than $12.74 — and so the carry can move the dollar figure itself up. */
+    const uint32_t cents_total = (micro + 5000u) / 10000u;
+    const uint32_t whole       = cents_total / 100u;
+    const uint32_t cents       = cents_total % 100u;
+
+    if (whole >= 1000u) {
+        snprintf(buf, n, "$%u.%uk", (unsigned)(whole / 1000u), (unsigned)((whole / 100u) % 10u));
+    } else if (whole >= 100u) {
+        snprintf(buf, n, "$%u", (unsigned)whole);
+    } else {
+        snprintf(buf, n, "$%u.%02u", (unsigned)whole, (unsigned)cents);
+    }
+}
+
+/* A line's role changes with the page — line 5 is a device figure on page one and a
+ * session row on page two — so the style is set on every render rather than left to
+ * whatever the previous page wanted. */
+static void stats_style(int idx, bool header, lv_coord_t x)
+{
+    if (idx < 0 || idx >= STATS_LINES || s_stats_txt[idx] == NULL) {
+        return;
+    }
+
+    /* Headers keep the 12 px face for the hierarchy; the rows take 10 px, because a
+     * full row (dot, label, token count, money) does not fit 172 px at 12: measured,
+     * the widest label ran 4 px into its figure. */
+    const lv_font_t *font = header ? &lv_font_montserrat_12 : &lv_font_montserrat_10;
+
+    lv_obj_set_style_text_font(s_stats_txt[idx], font, 0);
+    lv_obj_set_style_text_font(s_stats_val[idx], font, 0);
+    lv_obj_set_style_text_color(s_stats_txt[idx], lv_color_hex(header ? COL_DIM : COL_TEXT), 0);
+    lv_obj_set_style_text_letter_space(s_stats_txt[idx], header ? 1 : 0, 0);
+    lv_obj_set_x(s_stats_txt[idx], header ? STATS_X_LEFT : x);
+    lv_obj_set_style_text_color(s_stats_val[idx], lv_color_hex(COL_TEXT), 0);
+}
+
+/* One right-hand figure. Its own label, because there is nothing to right-align
+ * against otherwise. */
+static void stats_val(int idx, const char *fmt, ...)
+{
+    if (idx < 0 || idx >= STATS_LINES || s_stats_val[idx] == NULL) {
+        return;
+    }
+
+    char    buf[32];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+
+    lv_label_set_text(s_stats_val[idx], buf);
+}
+
+/* A section heading, with the hairline that separates it from what follows. */
+static void stats_header(int idx, const char *text)
+{
+    stats_style(idx, true, 0);
+    stats_line(idx, "%s", text);
+    stats_val(idx, "");
+
+    lv_obj_t *rule = s_stats_rule[idx == 0 ? 0 : 1];
+
+    lv_obj_set_pos(rule, STATS_X_LEFT, STATS_ROW_Y(idx) + 13);
+    lv_obj_set_width(rule, SCR_W - 2 * STATS_X_LEFT);
+    lv_obj_clear_flag(rule, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* A body line: left text, right figure, both in the brighter colour. */
+static void stats_row(int idx, lv_coord_t x, const char *left)
+{
+    stats_style(idx, false, x);
+    stats_line(idx, "%s", left);
+}
+
 static void ui_stats_render(void)
 {
     herdr_link_stats_t link = { 0 };
@@ -1252,22 +1350,63 @@ static void ui_stats_render(void)
     herdr_status_t   s = { 0 };
     const bool       have = herdr_client_get(&s);
 
-    if (s_stats_page == 0) {
-        /* Link, device and the things that go wrong. */
-        stats_line(0, "LINK");
-        stats_line(1, " gen %u  %s", (unsigned)link.gen, link.online ? "online" : "offline");
-        stats_line(2, " poll %u ok  %u err", (unsigned)link.polls, (unsigned)link.fail_total);
-        stats_line(3, " rtt %u ms  fail %u", (unsigned)link.rtt_ms, (unsigned)link.failures);
-        stats_line(4, "DEVICE");
-        stats_line(5, " up %uh%02um  heap %uK", (unsigned)(lv_tick_get() / 3600000u),
-                   (unsigned)((lv_tick_get() / 60000u) % 60u), (unsigned)(ui_device_free_heap() / 1024));
+    {
+        /* The page marker lives in the title: without it there is nothing on screen
+         * to say a second page exists. */
+        char title[16];
+
+        snprintf(title, sizeof title, "STATS  %u/%u", (unsigned)(s_stats_page + 1),
+                 (unsigned)s_stats_pages);
+        lv_label_set_text(s_stats_title, title);
+    }
+
+    /* Nothing a page does not use may keep the previous page's text: the two pages
+     * share these eleven lines and disagree about what belongs on them. */
+    for (int i = 0; i < STATS_LINES; i++) {
+        stats_style(i, false, STATS_X_LEFT);
+        stats_line(i, "");
+        stats_val(i, "");
+    }
+    for (int i = 0; i < 2; i++) {
+        lv_obj_add_flag(s_stats_rule[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    for (int i = 0; i < STATS_ROWS; i++) {
+        lv_obj_add_flag(s_stats_dot[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    /* Page one is the sessions: the figures worth opening the view for are the
+     * tokens and the money, and the link's own health is the second thing anyone
+     * wants (it is also the page the long-press overlay summarises). */
+    if (s_stats_page == 1) {
+        /* Link, device, and the things that go wrong. Each line is a label and a
+         * figure, because one long line is what made this view hard to read. */
         lv_mem_monitor_t mon;
         lv_mem_monitor(&mon);
-        stats_line(6, " lvgl %u%% frag %u%%", (unsigned)mon.used_pct, (unsigned)mon.frag_pct);
-        stats_line(7, " imu %u Hz  %s", (unsigned)imu.rate_hz, imu.calibrated ? "calibrated" : "raw");
-        stats_line(8, " ax %d %c  err %u", (int)imu.axis, (imu.sign > 0) ? '+' : '-', (unsigned)imu.errors);
-        stats_line(9, " rot %s  %dx%d", SPLIT ? "land" : "port", SCR_W, SCR_H);
-        stats_line(10, " in %u tap  %u dbl", (unsigned)s_taps, (unsigned)s_doubles);
+
+        stats_header(0, "LINK");
+        stats_row(1, STATS_X_LEFT, "gen");
+        stats_val(1, "%u", (unsigned)link.gen);
+        stats_row(2, STATS_X_LEFT, "poll");
+        stats_val(2, "%u ok  %u err", (unsigned)link.polls, (unsigned)link.fail_total);
+        stats_row(3, STATS_X_LEFT, "rtt");
+        stats_val(3, "%u ms  %u fail", (unsigned)link.rtt_ms, (unsigned)link.failures);
+        lv_obj_set_style_text_color(s_stats_val[1], lv_color_hex(link.online ? COL_TEXT : COL_BLOCKED), 0);
+
+        stats_header(4, "DEVICE");
+        stats_row(5, STATS_X_LEFT, "up");
+        stats_val(5, "%uh%02um  %uK", (unsigned)(lv_tick_get() / 3600000u),
+                  (unsigned)((lv_tick_get() / 60000u) % 60u), (unsigned)(ui_device_free_heap() / 1024));
+        stats_row(6, STATS_X_LEFT, "lvgl");
+        stats_val(6, "%u%%  frag %u%%", (unsigned)mon.used_pct, (unsigned)mon.frag_pct);
+        stats_row(7, STATS_X_LEFT, "imu");
+        stats_val(7, "%u Hz  %s", (unsigned)imu.rate_hz, imu.calibrated ? "calibrated" : "raw");
+        stats_row(8, STATS_X_LEFT, "axis");
+        stats_val(8, "%d %c  err %u", (int)imu.axis, (imu.sign > 0) ? '+' : '-', (unsigned)imu.errors);
+        stats_row(9, STATS_X_LEFT, "input");
+        stats_val(9, "%u tap  %u dbl", (unsigned)s_taps, (unsigned)s_doubles);
+        stats_row(10, STATS_X_LEFT, "rot");
+        stats_val(10, "%s %dx%d", SPLIT ? "land" : "port", SCR_W, SCR_H);
+
         s_stats_pages = 2;
         return;
     }
@@ -1278,38 +1417,52 @@ static void ui_stats_render(void)
     const bool       have_sessions = herdr_stats_get(&sess) && sess.valid;
 
     if (!have_sessions) {
-        stats_line(0, "SESSIONS");
-        stats_line(1, " no data yet — the bridge");
-        stats_line(2, " has not answered /stats");
-        for (int i = 3; i < STATS_LINES; i++) {
-            stats_line(i, "");
-        }
+        /* Two lines, ASCII only: the bundled fonts stop at 0x7F, so an em-dash or a
+         * bullet renders as an empty box (AGENTS.md §8). */
+        stats_header(0, "SESSIONS");
+        stats_row(1, STATS_X_LEFT, "no data yet: the bridge");
+        stats_row(2, STATS_X_LEFT, "has not answered /stats");
         return;
     }
 
-    char tin[16], tout[16];
+    char tin[16], tout[16], cost[16], age[12];
+
     fmt_tokens(tin, sizeof tin, sess.tokens_in);
     fmt_tokens(tout, sizeof tout, sess.tokens_out);
-    char age[12];
+    fmt_cost(cost, sizeof cost, sess.cost_micro);
     fmt_age(age, sizeof age, sess.age_s);
 
-    stats_line(0, "SESS %u   %s in", (unsigned)sess.sessions, tin);
-    stats_line(1, "out %s  msg %u", tout, (unsigned)sess.messages);
-    stats_line(2, "calls %u  last %s", (unsigned)sess.tool_calls, age);
+    stats_header(0, "SESSIONS");
+    stats_val(0, "%u", (unsigned)sess.sessions);
+
+    stats_row(1, STATS_X_LEFT, "tokens");
+    stats_val(1, "%s in  %s out", tin, tout);
+    stats_row(2, STATS_X_LEFT, "activity");
+    stats_val(2, "%u calls  %u msg", (unsigned)sess.tool_calls, (unsigned)sess.messages);
+
+    /* The figure worth reading first, so it takes the one accent colour on the page. */
+    stats_row(3, STATS_X_LEFT, "spend");
+    stats_val(3, "%s", cost);
+    lv_obj_set_style_text_color(s_stats_val[3], lv_color_hex(COL_DONE), 0);
+
+    stats_header(4, "AGENTS");
 
     const int shown = (have && s.count < HERDR_MAX_AGENTS) ? s.count : HERDR_MAX_AGENTS;
-    const int rows  = (shown < STATS_LINES - 3) ? shown : STATS_LINES - 3;
+    const int rows  = (shown < STATS_ROWS) ? shown : STATS_ROWS;
 
     for (int i = 0; i < rows; i++) {
         fmt_tokens(tin, sizeof tin, sess.per[i].tokens_in);
-        stats_line(3 + i, "%-9.9s %s %uc", have ? s.agents[i].label : "?", tin, sess.per[i].tool_calls);
-    }
+        fmt_cost(cost, sizeof cost, sess.per[i].cost_micro);
 
-    /* The link/device page fills all eleven lines and this one fills seven, so
-     * without this the device page's tail (the IMU line, the rotation line, the
-     * input counters) stays on screen under the session rows. */
-    for (int i = 3 + rows; i < STATS_LINES; i++) {
-        stats_line(i, "");
+        /* The label and its token count on the left, the money on the right. */
+        stats_style(5 + i, false, STATS_TEXT_X);
+        stats_line(5 + i, "%-9.9s %s", have ? s.agents[i].label : "?", tin);
+        stats_val(5 + i, "%s", cost);
+
+        lv_obj_set_pos(s_stats_dot[i], STATS_DOT_X, STATS_ROW_Y(5 + i) + 4);
+        lv_obj_set_style_bg_color(
+            s_stats_dot[i], lv_color_hex(have ? state_colour(s.agents[i].state) : COL_DIM), 0);
+        lv_obj_clear_flag(s_stats_dot[i], LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -1966,6 +2119,7 @@ void ui_companion_create(void)
 
     /* Stats view: a title plus a fixed block of lines, refreshed by
      * ui_stats_render() whenever it is on screen. */
+    s_stats_pages = 2;   /* known before the first draw, so the title can say so */
     s_stats_title = lv_label_create(s_stats_cont);
     make_passive(s_stats_title);
     lv_obj_set_style_text_font(s_stats_title, &lv_font_montserrat_14, 0);
@@ -1982,9 +2136,38 @@ void ui_companion_create(void)
         make_passive(s_stats_txt[i]);
         lv_obj_set_style_text_font(s_stats_txt[i], &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(s_stats_txt[i], lv_color_hex(COL_TEXT), 0);
-        lv_obj_set_pos(s_stats_txt[i], SPLIT ? HEADLINE_X : 10,
-                       HEADLINE_Y + 20 + i * (SPLIT ? 12 : 14));
+        lv_obj_set_pos(s_stats_txt[i], STATS_X_LEFT, STATS_ROW_Y(i));
         lv_label_set_text(s_stats_txt[i], "");
+
+        /* Right-aligned by alignment, not by padding: this font is not monospaced. */
+        s_stats_val[i] = lv_label_create(s_stats_cont);
+        make_passive(s_stats_val[i]);
+        lv_obj_set_style_text_font(s_stats_val[i], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(s_stats_val[i], lv_color_hex(COL_TEXT), 0);
+        lv_obj_align(s_stats_val[i], LV_ALIGN_TOP_RIGHT, SPLIT ? -6 : -10, STATS_ROW_Y(i));
+        lv_label_set_text(s_stats_val[i], "");
+    }
+
+    /* The hairline under a section header, in the same track colour as the face's
+     * ring, so the two views read as one design. */
+    for (int i = 0; i < 2; i++) {
+        s_stats_rule[i] = lv_obj_create(s_stats_cont);
+        make_passive(s_stats_rule[i]);
+        lv_obj_set_size(s_stats_rule[i], SCR_W - 2 * STATS_X_LEFT, 1);
+        lv_obj_set_style_bg_color(s_stats_rule[i], lv_color_hex(COL_TRACK), 0);
+        lv_obj_set_style_bg_opa(s_stats_rule[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(s_stats_rule[i], 0, 0);
+        lv_obj_set_style_radius(s_stats_rule[i], 0, 0);
+        lv_obj_set_style_pad_all(s_stats_rule[i], 0, 0);
+        lv_obj_add_flag(s_stats_rule[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    /* One per session row: the agent's own state colour, as in the mood view's list. */
+    for (int i = 0; i < STATS_ROWS; i++) {
+        s_stats_dot[i] = create_blob(s_stats_cont, STATS_DOT_D, STATS_DOT_D, STATS_DOT_X, 0);
+        lv_obj_set_style_bg_color(s_stats_dot[i], lv_color_hex(COL_DIM), 0);
+        lv_obj_set_style_bg_opa(s_stats_dot[i], LV_OPA_COVER, 0);
+        lv_obj_add_flag(s_stats_dot[i], LV_OBJ_FLAG_HIDDEN);
     }
 
     /* A rebuilt screen starts on the companion view, page one, no overlay: those
