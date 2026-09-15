@@ -1194,12 +1194,34 @@ static void fmt_tokens(char *buf, size_t n, uint32_t tokens)
     /* uint32_t is `unsigned long` on the C6 but `unsigned int` on the host, so
      * every argument is cast: -Werror=format catches the difference on one of the
      * two builds otherwise. */
-    if (tokens >= 1000000u) {
+    if (tokens >= 1000000000u) {
+        /* Live sessions reach into the billions: a long agent session re-sends its
+         * whole context every call, so a single session's input count passes 1e9
+         * on its own (measured: 322M, 522M, 239M for three sessions on the desk). */
+        snprintf(buf, n, "%u.%uG", (unsigned)(tokens / 1000000000u),
+                 (unsigned)((tokens / 100000000u) % 10u));
+    } else if (tokens >= 1000000u) {
         snprintf(buf, n, "%u.%uM", (unsigned)(tokens / 1000000u), (unsigned)((tokens / 100000u) % 10u));
     } else if (tokens >= 1000u) {
         snprintf(buf, n, "%u.%uk", (unsigned)(tokens / 1000u), (unsigned)((tokens / 100u) % 10u));
     } else {
         snprintf(buf, n, "%u", (unsigned)tokens);
+    }
+}
+
+/* Ages as a human reads them: seconds under a minute, then minutes, hours and
+ * days. "last 9602s" is what the raw field looks like (a session left overnight),
+ * and it says nothing to anyone. */
+static void fmt_age(char *buf, size_t n, uint32_t secs)
+{
+    if (secs < 60u) {
+        snprintf(buf, n, "%us", (unsigned)secs);
+    } else if (secs < 3600u) {
+        snprintf(buf, n, "%um", (unsigned)(secs / 60u));
+    } else if (secs < 86400u) {
+        snprintf(buf, n, "%uh%02um", (unsigned)(secs / 3600u), (unsigned)((secs / 60u) % 60u));
+    } else {
+        snprintf(buf, n, "%ud%uh", (unsigned)(secs / 86400u), (unsigned)((secs / 3600u) % 24u));
     }
 }
 
@@ -1268,14 +1290,26 @@ static void ui_stats_render(void)
     char tin[16], tout[16];
     fmt_tokens(tin, sizeof tin, sess.tokens_in);
     fmt_tokens(tout, sizeof tout, sess.tokens_out);
+    char age[12];
+    fmt_age(age, sizeof age, sess.age_s);
+
     stats_line(0, "SESS %u   %s in", (unsigned)sess.sessions, tin);
     stats_line(1, "out %s  msg %u", tout, (unsigned)sess.messages);
-    stats_line(2, "calls %u  last %us", (unsigned)sess.tool_calls, (unsigned)sess.age_s);
+    stats_line(2, "calls %u  last %s", (unsigned)sess.tool_calls, age);
 
     const int shown = (have && s.count < HERDR_MAX_AGENTS) ? s.count : HERDR_MAX_AGENTS;
-    for (int i = 0; i < STATS_LINES - 3 && i < shown; i++) {
+    const int rows  = (shown < STATS_LINES - 3) ? shown : STATS_LINES - 3;
+
+    for (int i = 0; i < rows; i++) {
         fmt_tokens(tin, sizeof tin, sess.per[i].tokens_in);
         stats_line(3 + i, "%-9.9s %s %uc", have ? s.agents[i].label : "?", tin, sess.per[i].tool_calls);
+    }
+
+    /* The link/device page fills all eleven lines and this one fills seven, so
+     * without this the device page's tail (the IMU line, the rotation line, the
+     * input counters) stays on screen under the session rows. */
+    for (int i = 3 + rows; i < STATS_LINES; i++) {
+        stats_line(i, "");
     }
 }
 
