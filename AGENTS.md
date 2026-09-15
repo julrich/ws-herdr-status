@@ -447,7 +447,7 @@ Two halves, no USB link needed after flashing:
 
 |Path|What it is|
 |---|---|
-|`bridge/herdr_status_bridge.py`|PC side, Python 3 **stdlib only**. Reads herdr over its Unix socket, serves `GET /state` on `0.0.0.0:8787`.|
+|`bridge/herdr_status_bridge.py`|PC side, Python 3 **stdlib only**. Reads herdr over its Unix socket and the agent harness's session logs, serves `GET /state` and `GET /stats` on `0.0.0.0:8787`.|
 |`main/`|Device firmware: WiFi station + HTTP poller + the LVGL blob companion.|
 |`tools/ui_host_test/`|Host render harness for the UI (§9a). `make ui-test`.|
 
@@ -462,8 +462,28 @@ Two halves, no USB link needed after flashing:
 - `/state` body: `{"v":1,"gen":<int>,"stale":<bool>,"agents":[{id,kind,label,status,focus}]}`,
   `gen` bumping on every successful poll, `stale` true >5 s after the last one.
   Labels are ASCII-sanitised here because the device's fonts are ASCII-only.
+- `/stats` body: `{"v":1,"gen":<int>,"stale":<bool>,"sessions":<int>,
+  "totals":{in,out,calls,messages,age_s},"agents":[{id,in,out,calls,messages,age_s,model}]}`.
+  Rows are keyed **and ordered** like the `/state` agents, so the device can match them
+  by id or by index; an agent herdr reports without a session path has no row.
+  The numbers come from the agent harness's own session logs
+  (`~/.omp/agent/sessions/<slug>/<ts>_<uuid>.jsonl`), located through the herdr
+  snapshot's `agent_session` (`kind == "path"`) — herdr has no usage data of its own,
+  and `~/.omp/stats.db` is only as fresh as the last `omp stats` run.
+  `calls` counts tool executions, `messages` counts assistant turns, `in` is prompt
+  tokens (including cache reads/writes, so `in + out == omp's own totalTokens`),
+  `age_s` is seconds since that log was last written and `totals.age_s` is the
+  youngest, `model` is the last model the session used (provider prefix stripped,
+  15 chars for the device's 16-byte buffer). `--once --stats` prints one body.
+- Only the record type, the tool-execution marker and
+  `message.{model,usage.{input,output,cacheRead,cacheWrite}}` are read out of a session
+  log: the records also hold the whole conversation and none of it is stored, logged or
+  served. The logs are read **incrementally** (per-file offset plus the partial trailing
+  line), never re-parsed, so a `/stats` request is served from a snapshot a background
+  thread refreshes once a second (~0.6 ms to serve, ~0.03 ms per refresh pass warm).
 - `--fixture bridge/fixtures/<mood>.json` serves a fixed agent list instead of
-  polling — this is how each companion mood is driven on real hardware.
+  polling — this is how each companion mood is driven on real hardware; a fixture only
+  carries the `/state` fields, so `/stats` reports zero sessions in that mode.
 - `bridge/herdr-status-bridge.service` is a **user** unit
   (`systemctl --user`); `make bridge-service-install` installs and enables it.
 
