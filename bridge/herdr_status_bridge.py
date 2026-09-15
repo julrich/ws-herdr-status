@@ -45,8 +45,8 @@ STALE_AFTER_S = 5.0
 FAIL_WARN_PERIOD_S = 30.0
 
 #: Period of the thread that rebuilds the /stats document. It only reads the bytes
-#: appended to the session logs since the previous pass, so this is ~1 ms per agent
-#: and never on the request path.
+#: appended to the session logs since the previous pass (0.03 ms for the three live
+#: logs with nothing appended), so this never touches the request path.
 STATS_REFRESH_S = 1.0
 
 #: Longest model string put on the wire: the device's buffer is 16 bytes with the NUL
@@ -223,9 +223,14 @@ def load_fixture(path):
 
 # The agent harness (omp) appends one newline-delimited JSON record per event to
 # ~/.omp/agent/sessions/<slug>/<ts>_<uuid>.jsonl -- 45 files / 58 MB on the machine
-# this was written for, the largest 11 MB. Reading one whole log takes ~120 ms and all
-# of them ~440 ms, so a request must never do it: a thread folds in the appended bytes
-# every STATS_REFRESH_S and the handler serves the finished document.
+# this was written for, the largest 11 MB. Reading all of them takes ~440 ms, so a
+# request must never do it: a thread folds in the appended bytes every STATS_REFRESH_S
+# and the handler serves the finished document.
+#
+# The one pass that does read a log in full is the first one after startup (~110 ms for
+# the three live agents here). json.loads holds the GIL while it runs, so a request that
+# lands in that window can take tens of ms instead of the ~0.6 ms a warm one takes; that
+# shows up once, on the first second after the bridge starts.
 #
 # omp's own ~/.omp/stats.db is deliberately NOT used: it is pre-aggregated, but only
 # as fresh as the last `omp stats` run (29 h stale when this was written), so it is
