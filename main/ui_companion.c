@@ -404,7 +404,7 @@ static lv_obj_t *s_stats_title;
 static lv_obj_t *s_stats_txt[STATS_LINES];
 static uint32_t  s_taps;      /* interaction counters, shown by the overlay */
 static uint32_t  s_longs;
-static uint32_t  s_swipes;
+static uint32_t  s_doubles;
 static uint32_t  s_flourish_count;
 static int       s_stats_page;    /* the stats view has two pages of its own */
 static int       s_stats_pages;
@@ -1168,7 +1168,7 @@ static void ui_overlay_render(void)
              "axis    %d %s%c  %s\n"
              "rot     %d  %dx%d\n"
              "input   tap %u  long %u\n"
-             "        swipe %u  view %s",
+             "        dbl %u  view %s",
              (unsigned)(up / 3600), (unsigned)((up / 60) % 60), (unsigned)(up % 60),
              (unsigned)(ui_device_free_heap() / 1024), (unsigned)(ui_device_min_free_heap() / 1024),
              (unsigned)mon.used_pct, (unsigned)mon.frag_pct,
@@ -1181,7 +1181,7 @@ static void ui_overlay_render(void)
              (imu.sign > 0) ? '+' : '-', imu.present ? "ok" : "gone",
              SPLIT ? 1 : 0, SCR_W, SCR_H,
              (unsigned)s_taps, (unsigned)s_longs,
-             (unsigned)s_swipes, ui_view_name(s_view));
+             (unsigned)s_doubles, ui_view_name(s_view));
 
     lv_label_set_text(s_overlay_text, buf);
 }
@@ -1267,7 +1267,7 @@ static void ui_stats_render(void)
         stats_line(7, " imu %u Hz  %s", (unsigned)imu.rate_hz, imu.calibrated ? "calibrated" : "raw");
         stats_line(8, " ax %d %c  err %u", (int)imu.axis, (imu.sign > 0) ? '+' : '-', (unsigned)imu.errors);
         stats_line(9, " rot %s  %dx%d", SPLIT ? "land" : "port", SCR_W, SCR_H);
-        stats_line(10, " in %u tap  %u swipe", (unsigned)s_taps, (unsigned)s_swipes);
+        stats_line(10, " in %u tap  %u dbl", (unsigned)s_taps, (unsigned)s_doubles);
         s_stats_pages = 2;
         return;
     }
@@ -1662,38 +1662,111 @@ static void ui_tick(lv_timer_t *timer)
  * LVGL fires CLICKED on release "regardless to long press" (lv_event.h), so both
  * a long press and a swipe are remembered here and keep their release from also
  * reading as a tap. */
-static bool s_long_fired;
-static bool s_gesture_fired;
+/* Two halves, four gestures, and no swipes.
+ *
+ * Swipes did the view switch and the paging, and they were the least reliable
+ * thing on this panel: a drag that LVGL reads as a gesture also suppresses the
+ * click, so a swipe that fell short did nothing at all, and one that carried on
+ * into the wrong object did something else. The screen is small enough to reach
+ * every corner, so the vocabulary is now positional.
+ *
+ * The long side of the screen is split into two equal halves, and the artwork
+ * keeps the same roles in both orientations — portrait puts the face in the top
+ * half with the agent list under it, landscape puts the face in the left half
+ * with the list beside it (see ui_layout_init) — so "the face's half" is always
+ * the first half along the split axis.
+ *
+ *   tap    the face's half    refresh from the bridge, play the flourish
+ *   tap    the list's half    forward a page (the agent list, or the stats page)
+ *   double the face's half    the other view
+ *   double the list's half    the diagnostics overlay
+ *   hold   anywhere           the overlay too, unchanged
+ *
+ * The face's tap fires immediately: it is the one that wants feedback, and its
+ * double (the other view) is orthogonal to it, so both may happen. The list's tap
+ * pages, which a double cannot also do, so that one waits out the double window
+ * (DOUBLE_MS) and is cancelled if a second tap arrives. */
+#define DOUBLE_MS 350   /* slow enough for a deliberate double tap */
+
+static bool       s_long_fired;
+static bool       s_have_last_click;
+static uint32_t   s_last_click_tick;
+static bool       s_last_click_list;
+static lv_timer_t *s_page_timer;   /* the list's single tap, waiting out the double window */
+
+/* The list's tap pages forward, but only once the double window has passed without
+ * a second tap: paging straight away and undoing it on a double flickers through a
+ * page nobody asked for, and depends on the exact state the previous click left
+ * behind. The face's tap stays immediate — that is the one that wants feedback. */
+static void page_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    s_page_timer = NULL;   /* one-shot: LVGL frees it once this returns */
+    ui_companion_on_page(1);
+}
 
 static void screen_event_cb(lv_event_t *e)
 {
     switch (lv_event_get_code(e)) {
     case LV_EVENT_PRESSED:
-        s_long_fired    = false;
-        s_gesture_fired = false;
+        s_long_fired = false;
         break;
+
     case LV_EVENT_LONG_PRESSED:
         s_long_fired = true;
         s_longs++;
         ui_companion_on_toggle_overlay();
         break;
-    case LV_EVENT_CLICKED:
-        if (!s_long_fired && !s_gesture_fired) {
-            ui_companion_on_tap();
-        }
-        break;
-    case LV_EVENT_GESTURE: {
-        /* lv_event.h: "A gesture is detected. Get the gesture with
-         * lv_indev_get_gesture_dir(lv_indev_get_act())". */
-        const lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
 
-        s_gesture_fired = true;
-        if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
-            s_swipes++;
-            ui_companion_on_switch_view(dir == LV_DIR_RIGHT ? 1 : -1);
-        } else if (dir == LV_DIR_TOP || dir == LV_DIR_BOTTOM) {
-            s_swipes++;
-            ui_companion_on_page(dir == LV_DIR_BOTTOM ? 1 : -1);
+    case LV_EVENT_CLICKED: {
+        if (s_long_fired) {
+            break; /* the long press owns this press */
+        }
+
+        const lv_indev_t *indev = lv_indev_get_act();
+        if (indev == NULL) {
+            break;
+        }
+
+        lv_point_t p = { 0, 0 };
+        lv_indev_get_point(indev, &p);
+
+        /* Portrait: the list is the bottom half. Landscape: the list is the right
+         * half, its column starting at x=148 of 320. */
+        const bool list_half = SPLIT ? (p.x >= SCR_W / 2) : (p.y >= SCR_H / 2);
+
+        const bool dbl = s_have_last_click && (s_last_click_list == list_half) &&
+                         lv_tick_elaps(s_last_click_tick) <= DOUBLE_MS;
+
+        s_have_last_click = !dbl; /* a third click starts over rather than chaining */
+        s_last_click_tick = lv_tick_get();
+        s_last_click_list = list_half;
+
+        if (dbl) {
+            /* Cancel the page the first click of this pair left waiting: the pair
+             * means the overlay, and the list should not also move. */
+            if (s_page_timer != NULL) {
+                lv_timer_del(s_page_timer);
+                s_page_timer = NULL;
+            }
+
+            s_doubles++;
+            if (list_half) {
+                ui_companion_on_toggle_overlay();
+            } else {
+                ui_companion_on_switch_view(1);
+            }
+            break;
+        }
+
+        if (list_half) {
+            if (s_page_timer != NULL) {
+                lv_timer_del(s_page_timer);
+            }
+            s_page_timer = lv_timer_create(page_timer_cb, DOUBLE_MS, NULL);
+            lv_timer_set_repeat_count(s_page_timer, 1);
+        } else {
+            ui_companion_on_tap();
         }
         break;
     }
@@ -1916,8 +1989,13 @@ void ui_companion_create(void)
 
     /* A rebuilt screen starts on the companion view, page one, no overlay: those
      * pointers all died with the previous screen. */
-    s_long_fired   = false;
-    s_view         = UI_VIEW_MOOD;
+    if (s_page_timer != NULL) {
+        lv_timer_del(s_page_timer);   /* it would fire onto the previous screen */
+        s_page_timer = NULL;
+    }
+    s_long_fired      = false;
+    s_have_last_click = false;
+    s_view            = UI_VIEW_MOOD;
     s_page         = 0;
     s_stats_page   = 0;
     s_stats_pages  = 2;

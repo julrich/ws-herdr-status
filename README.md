@@ -73,18 +73,22 @@ be added to `sdkconfig.defaults`.
 
 ## Using it
 
-- **Tap** to force an immediate poll; the mood's flourish plays as feedback.
-- **Hold a finger down** (~1 s) to raise the diagnostics overlay — heap, LVGL
-  pool, link health, IMU and the input counters. Hold again to drop it.
-- **Swipe left or right** to switch between the mood view and the stats view.
-- **Swipe up or down** to page the agent list when more agents are running than
-  fit on the screen.
+- **Tap the top half** (the face) to force an immediate poll; the mood's flourish
+  plays as feedback.
+- **Tap the bottom half** (the list) to page the agent list when more agents are
+  running than fit on the screen.
+- **Double tap the top half** to switch between the mood view and the stats view.
+- **Double tap the bottom half**, or **hold a finger down** (~1 s) anywhere, to
+  raise the diagnostics overlay (heap, LVGL pool, link health, IMU, input
+  counters). The same double tap, or another hold, drops it.
 - **Turn the board a quarter turn** and the UI follows into landscape, or back
-  into portrait. The choice is remembered across power cycles.
+  into portrait; the halves turn with it, so the face's half is the left one. The
+  choice is remembered across power cycles.
 
-The panel reports a single touch, so that is the whole vocabulary: tap, hold,
-swipe, turn. All four come from LVGL's own click / long-press / gesture events —
-no input task of our own (AGENTS.md §11).
+The panel reports a single touch, so that is the whole vocabulary: two halves,
+tap or double tap in each, plus a hold. Swipes were tried first and dropped — a
+drag that LVGL reads as a gesture also suppresses the click, so a swipe that fell
+short did nothing at all (AGENTS.md §11).
 - The face tells you the aggregate mood at a glance; the headline and list tell
   you which agents are responsible:
 
