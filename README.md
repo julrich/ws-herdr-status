@@ -16,7 +16,7 @@ herdr ──(unix socket, JSON)──> bridge/herdr_status_bridge.py ──(HTTP
 
 | Path | What it is |
 |---|---|
-| `bridge/herdr_status_bridge.py` | PC side. Reads herdr over its Unix socket, serves `GET /state` and `GET /healthz` on the LAN. Python 3 stdlib only, no dependencies. |
+| `bridge/herdr_status_bridge.py` | PC side. Reads herdr over its Unix socket, serves `GET /state` and `GET /stats` on the LAN. Python 3 stdlib only, no dependencies. |
 | `main/` | Firmware: WiFi station, HTTP poller, the LVGL companion, and the IMU-driven rotation. |
 | `components/` | Board drivers (JD9853 panel, AXS5106L touch, BSP glue) plus two fixes to the vendor touch driver, see *Notes*. |
 | `tools/ui_host_test/` | Renders the UI on the host and asserts on pixels — the only way to check the artwork without eyes on the panel. |
@@ -50,6 +50,15 @@ herdr has not answered for 5 s:
  "agents":[{"id":"w5:p1","kind":"omp","label":"PoC","status":"working","focus":true}]}
 ```
 
+`/stats` carries the per-agent session numbers the stats view draws (tokens in
+and out, calls, messages, age), keyed and ordered like the `/state` agents:
+
+```json
+{"v":1,"gen":17285,"stale":false,"sessions":2,
+ "totals":{"in":41235,"out":9004,"calls":311,"messages":264,"age_s":1840},
+ "agents":[{"id":"w5:p1","in":25120,"out":6103,"calls":188,"messages":160,"age_s":1840,"model":"opus"}]}
+```
+
 **2. The firmware (on the device).** Set the WiFi credentials and the bridge
 address once, then build and flash:
 
@@ -64,9 +73,18 @@ be added to `sdkconfig.defaults`.
 
 ## Using it
 
-- **Tap the screen** to force an immediate poll (the blob squashes as feedback).
+- **Tap** to force an immediate poll; the mood's flourish plays as feedback.
+- **Hold a finger down** (~1 s) to raise the diagnostics overlay — heap, LVGL
+  pool, link health, IMU and the input counters. Hold again to drop it.
+- **Swipe left or right** to switch between the mood view and the stats view.
+- **Swipe up or down** to page the agent list when more agents are running than
+  fit on the screen.
 - **Turn the board a quarter turn** and the UI follows into landscape, or back
   into portrait. The choice is remembered across power cycles.
+
+The panel reports a single touch, so that is the whole vocabulary: tap, hold,
+swipe, turn. All four come from LVGL's own click / long-press / gesture events —
+no input task of our own (AGENTS.md §11).
 - The face tells you the aggregate mood at a glance; the headline and list tell
   you which agents are responsible:
 
@@ -95,8 +113,9 @@ Set with `idf.py menuconfig` → *Herdr status companion*:
 ## Tests
 
 ```bash
-make ui-test              # 20 pixel scenarios: every mood, the burst, the idle
-                          # animations, decorations, and both orientations
+make ui-test              # 24 pixel scenarios: every mood, the burst, the idle
+                          # animations, decorations, both orientations, and the
+                          # gestures driven through LVGL's own pointer events
 make rotation-test        # 15 cases: axis calibration, quarter turns, jitter and
                           # drift rejection, lockout, 180-degree turns
 ```
@@ -140,6 +159,10 @@ The firmware carries two fixes to the vendor touch driver, both in
   sharing the bus;
 - the controller is read only while its INT line says a finger is present, which
   stopped it from wedging after ~1450 continuous reads.
+
+The panel is **single-touch**, and the way the second point fails is in AGENTS.md
+§7: a 14-byte (two-finger) read of the touch block is NACKed mid-transfer while an
+8-byte one succeeds. Anything that needs two fingers is not available here.
 
 Deeper notes — the panel's GRAM gap, the ASCII-only fonts, the LVGL port's
 behaviour, the IMU's 1000 ms I2C timeout and the rotation conventions — live in
