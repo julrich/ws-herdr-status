@@ -28,6 +28,8 @@ static const char *TAG = "esp_lcd_touch_axs5106";
 #define AXS5106_RETRY_GAP_MS 3
 
 #define TOUCH_AXS5106_TOUCH_POINTS_REG (0X01)
+/* Identification register, per the Arduino driver shipped with this panel. */
+#define AXS5106_ID_REG (0x08)
 #define TOUCH_AXS5106_TOUCH_P1_XH_REG (0x03)
 #define TOUCH_AXS5106_TOUCH_P1_XL_REG (0x04)
 #define TOUCH_AXS5106_TOUCH_P1_YH_REG (0x05)
@@ -110,6 +112,19 @@ esp_err_t esp_lcd_touch_new_i2c_axs5106(i2c_master_dev_handle_t dev_handle, cons
     /* Reset controller */
     ret = touch_axs5106_reset(esp_lcd_touch_axs5106);
     ESP_GOTO_ON_ERROR(ret, err, TAG, "AXS5106 reset failed");
+
+    /* The Arduino driver for this panel reads this register at init and only
+     * prints it when non-zero, so 0x00 is expected — what matters is that the
+     * controller answered at all. The ESP-IDF driver never checked, which is one
+     * reason a half-initialised part went unnoticed as long as it did. */
+    {
+        uint8_t id = 0;
+        if (touch_axs5106_i2c_read(esp_lcd_touch_axs5106, AXS5106_ID_REG, &id, 1) == ESP_OK) {
+            ESP_LOGI(TAG, "controller id register reads 0x%02x", id);
+        } else {
+            ESP_LOGW(TAG, "no answer from the controller after reset");
+        }
+    }
 
     /* Init controller */
     ret = touch_axs5106_init(esp_lcd_touch_axs5106);
@@ -291,6 +306,15 @@ static esp_err_t touch_axs5106_init(esp_lcd_touch_handle_t tp)
     return ESP_OK;
 }
 
+/* Reset timing is the vendor's own, from the Arduino driver that ships with this
+ * panel (Arduino/libraries/esp_lcd_touch_axs5106l): 200 ms asserted, then 300 ms
+ * of settle time. The ESP-IDF driver's 10 ms pulse is far too short — the part
+ * comes back up enough to ACK and report a point count while leaving the
+ * coordinate registers at zero, which is precisely the "raw n=1 p0=(172,0)" the
+ * panel produced, and it is not something any read strategy can recover from. */
+#define AXS5106_RESET_ASSERT_MS 200
+#define AXS5106_RESET_SETTLE_MS 300
+
 static esp_err_t touch_axs5106_reset(esp_lcd_touch_handle_t tp)
 {
     assert(tp != NULL);
@@ -298,9 +322,9 @@ static esp_err_t touch_axs5106_reset(esp_lcd_touch_handle_t tp)
     if (tp->config.rst_gpio_num != GPIO_NUM_NC)
     {
         ESP_RETURN_ON_ERROR(gpio_set_level(tp->config.rst_gpio_num, tp->config.levels.reset), TAG, "GPIO set level error!");
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(AXS5106_RESET_ASSERT_MS));
         ESP_RETURN_ON_ERROR(gpio_set_level(tp->config.rst_gpio_num, !tp->config.levels.reset), TAG, "GPIO set level error!");
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(AXS5106_RESET_SETTLE_MS));
     }
 
     return ESP_OK;
