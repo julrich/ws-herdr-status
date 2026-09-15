@@ -154,11 +154,20 @@ If nothing appears at all, check the cable is data-capable and the console
 The firmware carries two fixes to the vendor touch driver, both in
 `components/esp_lcd_touch_axs5106/` and both described in AGENTS.md §7:
 
-- the register read is one `i2c_master_transmit_receive()` instead of a
-  discarded transmit followed by a blind receive, which used to wedge the IMU
-  sharing the bus;
-- the controller is read only while its INT line says a finger is present, which
-  stopped it from wedging after ~1450 continuous reads.
+- the register read stays the vendor's two transactions (`i2c_master_transmit`
+  then `i2c_master_receive`) because this controller NACKs the repeated-start
+  form — measured, see AGENTS.md §7 — but the transmit result is now checked, so a
+  blind receive never follows an unacknowledged address phase and the IMU sharing
+  the bus is not knocked out;
+- the controller is read when INT says a report is ready, and also while the last
+  report still says a finger is down. Both halves are load-bearing, and both were
+  measured the hard way: reading on every poll is NACKed every time at idle (the
+  reset watchdog then fires and the controller does not recover), while reading
+  only on the asserting edge never notices a release — the finger-down sample
+  stays in the handle and LVGL holds a press that never ends, so tapping does
+  nothing at all;
+- the read is 8 bytes, one finger, rather than the vendor's 14: both answer, and
+  this panel is single-touch, so there is nothing beyond finger 1 to fetch.
 
 The panel is **single-touch**, and the way the second point fails is in AGENTS.md
 §7: a 14-byte (two-finger) read of the touch block is NACKed mid-transfer while an

@@ -34,6 +34,12 @@ static const char *TAG = "esp_lcd_touch_axs5106";
 /* The interrupt level seen by the previous read, so a sample is taken once per
  * assertion rather than for as long as the line stays asserted. */
 static int8_t s_int_level = -1;
+
+/* Whether the last report that got through said a finger was down. This has to be
+ * the driver's own flag: esp_lcd_touch_get_coordinates() consumes the sample (it
+ * zeroes tp->data.points), so the handle cannot answer this question. It is also
+ * what makes the release observable at all — see the gate in read_data(). */
+static bool s_finger_down;
 #define TOUCH_AXS5106_TOUCH_P1_XH_REG (0x03)
 #define TOUCH_AXS5106_TOUCH_P1_XL_REG (0x04)
 #define TOUCH_AXS5106_TOUCH_P1_YH_REG (0x05)
@@ -125,6 +131,11 @@ esp_err_t esp_lcd_touch_new_i2c_axs5106(i2c_master_dev_handle_t dev_handle, cons
         uint8_t id = 0;
         if (touch_axs5106_i2c_read(esp_lcd_touch_axs5106, AXS5106_ID_REG, &id, 1) == ESP_OK) {
             ESP_LOGI(TAG, "controller id register reads 0x%02x", id);
+            /* Which read discipline is running, so the console says so. Twice in
+             * one session a flashed image was mistaken for the previous one; this
+             * line settles it without reading the source. */
+            ESP_LOGI(TAG, "driver: two-step read, INT-gated, 8-byte window, "
+                          "release on empty read");
         } else {
             ESP_LOGW(TAG, "no answer from the controller after reset");
         }
@@ -164,11 +175,6 @@ static esp_err_t axs5106_read_recovering(esp_lcd_touch_handle_t tp, uint8_t reg,
         vTaskDelay(pdMS_TO_TICKS(AXS5106_RETRY_GAP_MS));
     }
 
-    /* The report is still pending in the controller, and it will not assert the
-     * line again for data it has already announced. Forgetting the level lets the
-     * next poll retry, so one badly timed read does not cost the whole touch. */
-    s_int_level = -1;
-
     if (++fail_streak >= AXS5106_FAILS_BEFORE_RESET) {
         fail_streak = 0;
         ESP_LOGW(TAG, "controller stopped answering: resetting it");
@@ -186,42 +192,70 @@ static esp_err_t esp_lcd_touch_axs5106_read_data(esp_lcd_touch_handle_t tp)
 
     assert(tp != NULL);
 
-    /* Read once per interrupt assertion — the way the vendor's own Arduino driver
-     * for this panel does it: an ISR on the falling edge sets a flag, and the
-     * read consumes the flag before touching the bus.
+    /* This controller answers only when it has a report to give, and INT is how
+     * it says so. Two measurements on this unit shape the rule:
      *
-     * Reading whenever the line merely *is* asserted (what this driver did first)
-     * hammers the controller for the whole duration of a touch, and it answers
-     * with NACKs: the panel log showed read failures only ever at the moment of a
-     * touch, two attempts each, over and over, with no sample ever obtained.
-     * Waiting for a fresh assertion makes each read happen when the controller
-     * says a report is ready, which is both gentler and correctly timed.
+     *  - Reading on every poll (the vendor's own IDF driver, and what this driver
+     *    did first) is refused every single time: at idle, every read NACKs at the
+     *    50 ms poll rate, the fail-streak reset fires every ~8 attempts, and the
+     *    controller does not recover. An idle panel must not be polled for data.
+     *  - Reading only on the *asserting* edge loses the release. A release that is
+     *    not announced as another report leaves the last finger-down sample in
+     *    tp->data, and nothing else clears it: esp_lcd_touch_read_data() only
+     *    forwards to the driver, while esp_lcd_touch_get_coordinates() consumes
+     *    the sample by zeroing tp->data.points. LVGL then holds a press that never
+     *    comes up, so no tap, long press or swipe ever fires — a dead-looking
+     *    panel with a healthy driver and a clean log.
      *
-     * Idle panels still cost nothing: with no finger down the line never asserts,
-     * so the IMU on this shared bus gets the silence it needs (AGENTS.md §11). */
+     * So: read when the controller announces a report, and also while the last
+     * report still says a finger is down. If that second read finds nothing
+     * pending, the finger has stopped reporting, which is the release. */
     if (tp->config.int_gpio_num != GPIO_NUM_NC) {
         const int  level  = gpio_get_level(tp->config.int_gpio_num);
         const int  active = tp->config.levels.interrupt ? 1 : 0;
         const bool fresh  = (level == active) && (s_int_level != active);
 
         s_int_level = (int8_t)level;
-        if (!fresh) {
-            return ESP_OK; /* no new report */
+        if (!fresh && !s_finger_down) {
+            return ESP_OK; /* nothing announced, nothing outstanding */
         }
     }
 
-    err = axs5106_read_recovering(tp, TOUCH_AXS5106_TOUCH_POINTS_REG, data, 14);
-    ESP_RETURN_ON_ERROR(err, TAG, "I2C read error!");
+    /* Count + finger 1 only, registers 0x01..0x08: this panel is single-touch, so
+     * this is the whole report. The vendor's 14 bytes reach into 0x09..0x0E, the
+     * second finger's window, which is the leading suspect for the data-phase
+     * NACKs this board produced during touches (AGENTS.md §7). */
+    err = axs5106_read_recovering(tp, TOUCH_AXS5106_TOUCH_POINTS_REG, data, 8);
+    if (err != ESP_OK) {
+        /* Nothing pending. With a finger down that is the release, and it has to
+         * be reported as one: the alternative is a press that stands forever.
+         * A driver failure means "no touch" to the caller, which is why this
+         * clears the sample and returns success rather than the error. */
+        if (s_finger_down) {
+            s_finger_down = false;
+            portENTER_CRITICAL(&tp->data.lock);
+            tp->data.points = 0;
+            portEXIT_CRITICAL(&tp->data.lock);
+            ESP_LOGI(TAG, "finger up (no report pending)");
+        }
+        return ESP_OK;
+    }
     points = data[1];
     points = points & 0x0F;
 
+    const bool was_down = s_finger_down;
+    s_finger_down = (points > 0);
+
     if (points == 0)
     {
+        if (was_down) {
+            ESP_LOGI(TAG, "finger up");
+        }
         return ESP_OK;
     }
 
-    /* Number of touched points */
-    points = (points > 2 ? 2 : points);
+    /* One finger is all this panel reports, and all an 8-byte read carries. */
+    points = (points > 1 ? 1 : points);
 
     // err = touch_axs5106_i2c_read(tp, TOUCH_AXS5106_TOUCH_P1_XH_REG, data, 6 * points);
     // ESP_RETURN_ON_ERROR(err, TAG, "I2C read error!");
@@ -240,6 +274,15 @@ static esp_err_t esp_lcd_touch_axs5106_read_data(esp_lcd_touch_handle_t tp)
         tp->data.coords[i].x |= data[3 + i * 6];
     }
     portEXIT_CRITICAL(&tp->data.lock);
+
+    /* Transition only: two lines per touch, and the down line carries the raw
+     * coordinates, which is how the panel's mapping is confirmed on hardware
+     * without eyes on the screen. */
+    if (!was_down) {
+        ESP_LOGI(TAG, "finger down (%u,%u)", (unsigned)tp->data.coords[0].x,
+                 (unsigned)tp->data.coords[0].y);
+    }
+
     return ESP_OK;
 }
 
@@ -305,15 +348,31 @@ static esp_err_t touch_axs5106_i2c_read(esp_lcd_touch_handle_t tp, uint8_t reg, 
 {
     assert(tp != NULL);
     assert(data != NULL);
-    /* One combined transaction (address phase, repeated start, read).
+    /* Two transactions, the way the vendor's driver does it: write the register
+     * address, then read it in a separate transaction, with a STOP in between.
      *
-     * The vendor's version issued i2c_master_transmit() and i2c_master_receive()
-     * as two separate transactions and threw the transmit result away — this
-     * driver is shared with the QMI8658A, which sits on the same bus, and an
-     * aborted address phase followed by a blind read wedged it often enough to
-     * knock the IMU's own reads out (see AGENTS.md §11). i2c_master_transmit_receive()
-     * has no window in between for that to happen. */
-    return i2c_master_transmit_receive(g_dev_handle, &reg, 1, data, len, 100);
+     * Measured on this unit with a probe that tried all four shapes over one
+     * touch (AGENTS.md §7):
+     *
+     *   transmit + receive          14 bytes -> ESP_OK   (block 00 01 80 5d 00 c5 40 10)
+     *   transmit + receive           8 bytes -> ESP_OK
+     *   transmit_receive (RESTART)   14 and 8 -> NACK, ESP_ERR_INVALID_STATE
+     *
+     * The AXS5106 does not answer a read joined to the address phase by a
+     * repeated start; it wants the STOP. That is why the vendor's driver and the
+     * working template use this shape, and why every touch read in this project
+     * failed while the QMI8658A on the same bus read fine through the same
+     * helper: the IMU accepts a repeated start, this controller does not. The
+     * length was never the problem.
+     *
+     * The vendor threw the transmit result away. This does not: an unacknowledged
+     * address phase leaves the controller unaddressed, and a blind read after
+     * that is what knocked the QMI8658A's own reads out (AGENTS.md §11). */
+    esp_err_t err = i2c_master_transmit(g_dev_handle, &reg, 1, 100);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return i2c_master_receive(g_dev_handle, data, len, 100);
 }
 
 static esp_err_t touch_axs5106_init(esp_lcd_touch_handle_t tp)

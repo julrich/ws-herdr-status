@@ -321,9 +321,13 @@ build on it.
 
 - `touch_axs5106_init()` is literally `return ESP_OK;` — no chip-ID read, no
   validation. **A clean boot therefore proves nothing about the touch panel.**
-- `touch_axs5106_i2c_read()` does `ret = i2c_master_transmit(...)` then
-  `ret = i2c_master_receive(...)`, discarding the transmit result. A failed
-  register-address write is masked.
+- `touch_axs5106_i2c_read()` does `i2c_master_transmit(...)` then
+  `i2c_master_receive(...)` as two transactions, discarding the transmit result —
+  a failed register-address write is masked. **Do not "fix" this into a single
+  `i2c_master_transmit_receive()`**: measured on this unit, the AXS5106 answers
+  the two-transaction form and *NACKs* the repeated-start form (see below). What
+  the transmit result check buys is narrower than that — skip the blind receive
+  when the address phase was not acknowledged.
 - `touch_axs5106_i2c_write()` had its entire body commented out and **fell off
   the end of a non-void function**. It was never called, so it was inert, but it
   emitted an `-Wunused-function` warning at build time. In *this* project's copy
@@ -331,6 +335,60 @@ build on it.
   `i2c_master_transmit_receive()` instead of a discarded transmit followed by a
   blind receive — that sequence used to wedge the QMI8658A sharing the bus
   (§11). The vendor's original is otherwise unchanged.
+
+### Reading the controller: neither extreme works
+
+Two failures are measured on this unit, and the design sits between them.
+
+**Reading on every poll** — which the vendor's own *IDF* driver does — is refused
+every single time. At idle, every read NACKs at the port's 50 ms rate, the
+fail-streak reset below fires every ~8 attempts, and the controller does not
+recover: the log becomes a wall of `I2C transaction unexpected nack detected` and
+`I2C read error!`. This controller answers only when it has a report to give, and
+INT is how it says so — which is also why the vendor's *Arduino* driver for this
+panel is interrupt-driven.
+
+**Reading only on the asserting edge** (the first attempt at following that
+Arduino driver) loses the release, and it fails **silently**. A release that is
+not announced as another report leaves the last finger-down sample in `tp->data`,
+and nothing else clears it: `esp_lcd_touch_read_data()` only forwards to the
+driver, while `esp_lcd_touch_get_coordinates()` *consumes* the sample by zeroing
+`tp->data.points`. LVGL then holds one pointer press that never comes up — **no
+click, no long press, no swipe** — with a healthy driver, a clean boot log and a
+clean health signal. That is exactly how this presented: a dead-looking panel.
+
+What works: read when the controller announces a report, **and** while the last
+report still says a finger is down. If that second read finds nothing pending, the
+finger has stopped reporting, which *is* the release — so the driver clears the
+sample and logs `finger up (no report pending)`. It also logs the down transition,
+`finger down (x,y)`, with the raw coordinates, which is how the panel's mapping is
+checked without eyes on the screen. Idle panels still cost nothing on the bus.
+
+### The read shape, measured
+
+A probe that tried all four shapes over a single touch settled this, and it was
+worth the tap: the controller answers **two transactions** (`i2c_master_transmit`
+for the register address, then `i2c_master_receive` for the data, STOP between
+them) and **NACKs** a read joined to the address phase by a repeated start
+(`i2c_master_transmit_receive` → `ESP_ERR_INVALID_STATE`). Both lengths worked, so
+the length was never the problem:
+
+```
+read two-step 14 -> ESP_OK                 block 00 01 80 5d 00 c5 40 10
+read two-step  8 -> ESP_OK                 block 00 01 80 5d 00 c5 40 10
+read one-call 14 -> ESP_ERR_INVALID_STATE  (NACK)
+read one-call  8 -> ESP_ERR_INVALID_STATE  (NACK)
+```
+
+That block decodes through the driver's own arithmetic to one finger at
+x=93, y=197. This also explains the asymmetric symptom that cost a session: the
+QMI8658A on the same bus reads happily through `i2c_master_transmit_receive`, so
+the touch path looked like the odd one out rather than the repeated start being
+the wrong shape for this part.
+
+The read is **8 bytes from 0x01** (count + finger 1, registers 0x01..0x08) rather
+than the vendor's 14 — both answer, and this panel is single-touch, so there is
+nothing beyond finger 1 to fetch.
 
 Useful consequence: because the driver polls every `LV_INDEV_DEF_READ_PERIOD`
 (30 ms) and logs `I2C read error!` at ERROR level on failure, **a session with
@@ -342,16 +400,15 @@ physical press does.
 ### One finger, not two
 
 The driver caches the second point (`touchpad_x[1]`/`y[1]`) but on this panel it
-is unreachable, and the way it fails is informative **[verified on this unit]**:
-a 14-byte read of the touch block (`0x01` = count + 2 x 6 bytes, i.e. both
-fingers) is answered with a **data-phase NACK** — `I2C transaction unexpected
-nack detected` — on most attempts, while an 8-byte read (count + one finger)
-succeeds. A NACK *during* the data phase means the address phase ACKed and the
-controller then refused partway, which is what a register window that ends after
-finger 1 looks like. Nothing in the vendor docs, the demo or the product page
-describes this panel as multi-touch. Treat it as single-touch: one finger, and
-LVGL's own click / long-press / gesture events are the whole input vocabulary
-(§11).
+is unreachable. **Measured** (see "The read shape, measured" above): the touch block answers both
+an 14-byte and an 8-byte read, and reports `points = 1` for one finger. The
+project's touch failures were a read-shape problem, not a length or a window
+problem. The driver reads **8 bytes** (count + finger 1, `0x01`..`0x08`), which is
+all a single-touch panel has to give.
+
+Nothing in the vendor docs, the demo or the product page describes this panel as
+multi-touch. Treat it as single-touch: one finger, and LVGL's own click /
+long-press / gesture events are the whole input vocabulary (§11).
 
 `bsp_touch_init` sets `x_max = min(xmax, ymax)` and `y_max = max(xmax, ymax)`
 regardless of rotation. That is correct for portrait, and pairs with
