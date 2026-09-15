@@ -30,6 +30,10 @@ static const char *TAG = "esp_lcd_touch_axs5106";
 #define TOUCH_AXS5106_TOUCH_POINTS_REG (0X01)
 /* Identification register, per the Arduino driver shipped with this panel. */
 #define AXS5106_ID_REG (0x08)
+
+/* The interrupt level seen by the previous read, so a sample is taken once per
+ * assertion rather than for as long as the line stays asserted. */
+static int8_t s_int_level = -1;
 #define TOUCH_AXS5106_TOUCH_P1_XH_REG (0x03)
 #define TOUCH_AXS5106_TOUCH_P1_XL_REG (0x04)
 #define TOUCH_AXS5106_TOUCH_P1_YH_REG (0x05)
@@ -160,6 +164,11 @@ static esp_err_t axs5106_read_recovering(esp_lcd_touch_handle_t tp, uint8_t reg,
         vTaskDelay(pdMS_TO_TICKS(AXS5106_RETRY_GAP_MS));
     }
 
+    /* The report is still pending in the controller, and it will not assert the
+     * line again for data it has already announced. Forgetting the level lets the
+     * next poll retry, so one badly timed read does not cost the whole touch. */
+    s_int_level = -1;
+
     if (++fail_streak >= AXS5106_FAILS_BEFORE_RESET) {
         fail_streak = 0;
         ESP_LOGW(TAG, "controller stopped answering: resetting it");
@@ -177,21 +186,27 @@ static esp_err_t esp_lcd_touch_axs5106_read_data(esp_lcd_touch_handle_t tp)
 
     assert(tp != NULL);
 
-    /* Only talk to the controller when its interrupt line says there is
-     * something to read.
+    /* Read once per interrupt assertion — the way the vendor's own Arduino driver
+     * for this panel does it: an ISR on the falling edge sets a flag, and the
+     * read consumes the flag before touching the bus.
      *
-     * The vendor's driver polled the part on every display input period whether
-     * or not anyone was touching it, and on this board the controller stopped
-     * acknowledging after roughly 1450 continuous reads (about 70 s at 50 ms) —
-     * which also knocked out the QMI8658A sharing the bus, because a failing
-     * transaction churns the bus (AGENTS.md §7, §11). INT exists precisely to
-     * avoid that: idle panels now cost no I2C traffic at all, and a touch
-     * asserts INT and is read as before. */
+     * Reading whenever the line merely *is* asserted (what this driver did first)
+     * hammers the controller for the whole duration of a touch, and it answers
+     * with NACKs: the panel log showed read failures only ever at the moment of a
+     * touch, two attempts each, over and over, with no sample ever obtained.
+     * Waiting for a fresh assertion makes each read happen when the controller
+     * says a report is ready, which is both gentler and correctly timed.
+     *
+     * Idle panels still cost nothing: with no finger down the line never asserts,
+     * so the IMU on this shared bus gets the silence it needs (AGENTS.md §11). */
     if (tp->config.int_gpio_num != GPIO_NUM_NC) {
         const int  level  = gpio_get_level(tp->config.int_gpio_num);
-        const bool active = tp->config.levels.interrupt ? 1 : 0;
-        if (level != active) {
-            return ESP_OK; /* nothing to read */
+        const int  active = tp->config.levels.interrupt ? 1 : 0;
+        const bool fresh  = (level == active) && (s_int_level != active);
+
+        s_int_level = (int8_t)level;
+        if (!fresh) {
+            return ESP_OK; /* no new report */
         }
     }
 
