@@ -56,8 +56,10 @@ static inline const char *herdr_state_name(herdr_agent_state_t s)
 #ifdef UI_USE_ESP_LOG
 #include "esp_log.h"
 #define UI_LOGI(tag, fmt, ...) ESP_LOGI(tag, fmt, ##__VA_ARGS__)
+#define UI_LOGW(tag, fmt, ...) ESP_LOGW(tag, fmt, ##__VA_ARGS__)
 #else
 #define UI_LOGI(tag, fmt, ...) ((void)0)
+#define UI_LOGW(tag, fmt, ...) ((void)0)
 #endif
 
 /* Session statistics for the stats view, served by the bridge's GET /stats and
