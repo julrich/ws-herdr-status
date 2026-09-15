@@ -377,6 +377,13 @@ static lv_obj_t *s_part[PART_N];
 static lv_obj_t *s_mouth;
 static lv_obj_t *s_mouth_flat;
 static lv_obj_t *s_ripple[RIPPLE_N];
+/* Each ring's own diameter range. The fade is driven by the animation's progress
+ * rather than by the current diameter: a size-tied fade (v - BODY_D over the
+ * burst's RIPPLE_D1) stops part-way when a shorter animation — a tap flourish —
+ * ends early, which left a faint ring parked around the face. */
+static struct {
+    int32_t d0, d1;
+} s_ripple_geom[RIPPLE_N];
 static lv_obj_t *s_alert;
 static lv_obj_t *s_z;
 static lv_obj_t *s_z2;
@@ -511,14 +518,36 @@ static void anim_z_float(void *var, int32_t v)
 /* Mood-change burst ring: expands from the face's own size out past the panel
  * edge while fading out. border_opa (not opa) so the fade is real: style `opa`
  * on a plain object is an all-or-nothing cutoff in LVGL 8 (lv_obj_draw.c). */
+static int ripple_index_of(const lv_obj_t *ring)
+{
+    for (int i = 0; i < RIPPLE_N; i++) {
+        if (s_ripple[i] == ring) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+/* v is progress 0..1000, not a diameter, so the ring always fades to nothing
+ * however far its own animation was asked to grow. */
 static void anim_ripple(void *var, int32_t v)
 {
-    lv_obj_t *ring = var;
-    int32_t fade = RIPPLE_OPA - RIPPLE_OPA * (v - BODY_D) / (RIPPLE_D1 - BODY_D);
+    lv_obj_t          *ring = var;
+    const int32_t      d = s_ripple_geom[ripple_index_of(ring)].d0 +
+                           (s_ripple_geom[ripple_index_of(ring)].d1 -
+                            s_ripple_geom[ripple_index_of(ring)].d0) * v / 1000;
+    const int32_t      opa = RIPPLE_OPA - RIPPLE_OPA * v / 1000;
 
-    lv_obj_set_size(ring, (lv_coord_t)v, (lv_coord_t)v);
-    lv_obj_set_pos(ring, BODY_CX - v / 2, BODY_CY - v / 2);
-    lv_obj_set_style_border_opa(ring, (lv_opa_t)(fade < 0 ? 0 : fade), 0);
+    lv_obj_set_size(ring, (lv_coord_t)d, (lv_coord_t)d);
+    lv_obj_set_pos(ring, BODY_CX - d / 2, BODY_CY - d / 2);
+    lv_obj_set_style_border_opa(ring, (lv_opa_t)opa, 0);
+}
+
+/* Park the ring out of the way once its animation is over: an invisible ring is
+ * still an invalidated area on every refresh. */
+static void ripple_ready_cb(lv_anim_t *a)
+{
+    lv_obj_add_flag((lv_obj_t *)a->var, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* Background wash in the new mood's colour: up fast, back down slowly. */
@@ -937,19 +966,23 @@ static void ui_start_burst(void)
     s_burst_colour = m->body;
 
     for (int i = 0; i < RIPPLE_N; i++) {
+        s_ripple_geom[i].d0 = BODY_D;
+        s_ripple_geom[i].d1 = RIPPLE_D1;
+
         lv_anim_del(s_ripple[i], anim_ripple);
         lv_obj_set_style_border_color(s_ripple[i], lv_color_hex(m->body), 0);
         lv_obj_clear_flag(s_ripple[i], LV_OBJ_FLAG_HIDDEN);
-        anim_ripple(s_ripple[i], BODY_D);
+        anim_ripple(s_ripple[i], 0);
 
         lv_anim_t a;
         lv_anim_init(&a);
         lv_anim_set_var(&a, s_ripple[i]);
         lv_anim_set_exec_cb(&a, anim_ripple);
-        lv_anim_set_values(&a, BODY_D, RIPPLE_D1);
+        lv_anim_set_values(&a, 0, 1000);
         lv_anim_set_delay(&a, (uint32_t)i * RIPPLE_STAGGER);
         lv_anim_set_time(&a, RIPPLE_MS);
         lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+        lv_anim_set_ready_cb(&a, ripple_ready_cb);
         lv_anim_start(&a);
     }
 
@@ -1261,18 +1294,22 @@ static void ui_flourish_start(void)
     s_flourish_count++;
     s_burst_colour = s_moods[s_mood].body;
 
+    s_ripple_geom[0].d0 = BODY_D;
+    s_ripple_geom[0].d1 = BODY_D + f->ring_grow;
+
     lv_anim_del(s_ripple[0], anim_ripple);
     lv_obj_set_style_border_color(s_ripple[0], lv_color_hex(s_burst_colour), 0);
     lv_obj_clear_flag(s_ripple[0], LV_OBJ_FLAG_HIDDEN);
-    anim_ripple(s_ripple[0], BODY_D);
+    anim_ripple(s_ripple[0], 0);
 
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, s_ripple[0]);
     lv_anim_set_exec_cb(&a, anim_ripple);
-    lv_anim_set_values(&a, BODY_D, BODY_D + f->ring_grow);
+    lv_anim_set_values(&a, 0, 1000);
     lv_anim_set_time(&a, f->ring_ms);
     lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_set_ready_cb(&a, ripple_ready_cb);
     lv_anim_start(&a);
 
     if (f->wash > 0) {
