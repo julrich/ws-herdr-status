@@ -73,7 +73,8 @@ typedef struct {
     uint32_t tokens_out;
     uint32_t messages;
     uint32_t tool_calls;
-    uint32_t age_s; /* seconds since this session's last activity */
+    uint32_t age_s;      /* seconds since this session's last activity */
+    uint32_t cost_micro; /* the provider's own figure, in micro-dollars: 1e6 == $1 */
     char     model[HERDR_MODEL_LEN];
 } herdr_session_t;
 
@@ -85,6 +86,7 @@ typedef struct {
     uint32_t messages;
     uint32_t tool_calls;
     uint32_t age_s;     /* since the newest activity across sessions */
+    uint32_t cost_micro; /* micro-dollars, summed over the sessions */
     herdr_session_t per[HERDR_MAX_AGENTS];
 } herdr_sessions_t;
 

@@ -51,12 +51,15 @@ herdr has not answered for 5 s:
 ```
 
 `/stats` carries the per-agent session numbers the stats view draws (tokens in
-and out, calls, messages, age), keyed and ordered like the `/state` agents:
+and out, calls, messages, age, and what the session has cost), keyed and ordered
+like the `/state` agents. Money travels as integer **micro-dollars** — `1_000_000`
+is $1 — so the device can print two decimals with integer arithmetic:
 
 ```json
 {"v":1,"gen":17285,"stale":false,"sessions":2,
- "totals":{"in":41235,"out":9004,"calls":311,"messages":264,"age_s":1840},
- "agents":[{"id":"w5:p1","in":25120,"out":6103,"calls":188,"messages":160,"age_s":1840,"model":"opus"}]}
+ "totals":{"in":41235,"out":9004,"calls":311,"messages":264,"age_s":1840,"cost_micro":12745891},
+ "agents":[{"id":"w5:p1","in":25120,"out":6103,"calls":188,"messages":160,"age_s":1840,
+            "cost_micro":4564666,"model":"opus"}]}
 ```
 
 **2. The firmware (on the device).** Set the WiFi credentials and the bridge
@@ -78,6 +81,9 @@ be added to `sdkconfig.defaults`.
 - **Tap the bottom half** (the list) to page the agent list when more agents are
   running than fit on the screen.
 - **Double tap the top half** to switch between the mood view and the stats view.
+  The stats view opens on the sessions page — tokens in and out, calls, messages
+  and the money spent, with a row per agent — and the list's half pages to the
+  link and device figures.
 - **Double tap the bottom half**, or **hold a finger down** (~1 s) anywhere, to
   raise the diagnostics overlay (heap, LVGL pool, link health, IMU, input
   counters). The same double tap, or another hold, drops it.

@@ -734,6 +734,20 @@ Two halves, no USB link needed after flashing:
 - The diagnostics overlay is created on demand and deleted on the next long
   press; `ui_companion_create()` clears those pointers because they die with the
   screen.
+- **The stats view is a two-column table**, sessions first: a header and three
+  totals lines, then one row per agent (a state-coloured dot, the label with its
+  token count, and the cost right-aligned), and the link/device page behind it. Each
+  row's figure is its own right-aligned label, because this font is not monospaced
+  and padding with spaces would not line anything up. The rows use a **10 px face**
+  and the headers 12: at 12 the widest row ran 4 px into its cost, measured — and
+  the harness now asserts the columns cannot collide (`assert_columns`), since LVGL
+  does not clip a label and an over-long string simply overlaps its neighbour.
+- **Money is integer micro-dollars** on the wire (`cost_micro`, 1e6 == $1) from the
+  session's own `usage.cost.total`, summed per message like the token counts. The
+  device rounds to cents *before* splitting dollars off, so $12.7459 reads $12.75
+  rather than $12.74. Display strings are ASCII only: the bundled Montserrat faces
+  stop at 0x7F, and an em-dash in the empty state rendered as an empty box until it
+  was caught by looking at the frame.
 - **Stats come from the agents' own session logs**, not from herdr: herdr exposes
   only the session *path* (`agent_session.kind == "path"`), while the omp jsonl
   carries `message.message.usage.{input,output,...}` and `usage.cost.total` in

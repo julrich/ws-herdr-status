@@ -265,6 +265,10 @@ class SessionTail:
         self.tokens_out = 0
         self.calls = 0
         self.messages = 0
+        # USD, summed from each message's usage.cost.total. Kept as a float while it
+        # accumulates and rounded once on the way out (the wire carries integer
+        # micro-dollars, so the device never has to do float arithmetic).
+        self.cost_usd = 0.0
         self.model = ""
         self.mtime = 0.0
 
@@ -281,6 +285,7 @@ class SessionTail:
             self.tokens_out = 0
             self.calls = 0
             self.messages = 0
+            self.cost_usd = 0.0
             self.model = ""
         if st.st_size > self.offset:
             with open(self.path, "rb") as fh:
@@ -300,7 +305,7 @@ class SessionTail:
 
         Only these fields are read, nothing else is kept, and the parsed record is
         dropped as soon as it has been looked at: the record type, the tool-execution
-        marker, and message.{model,usage.{input,output,cacheRead,cacheWrite}}. The
+        marker, and message.{model,usage.{input,output,cacheRead,cacheWrite,cost}}. The
         records also carry the whole conversation, and none of it leaves this process.
         """
         for line in lines:
@@ -333,6 +338,14 @@ class SessionTail:
                 + _token_count(usage.get("cacheWrite"))
             )
             self.tokens_out += _token_count(usage.get("output"))
+            # What the session has cost so far. The figure is the provider's own
+            # (usage.cost.total, already in USD), not something this bridge computes
+            # from a price table it would have to keep current.
+            cost = usage.get("cost")
+            if isinstance(cost, dict):
+                total = cost.get("total")
+                if isinstance(total, (int, float)):
+                    self.cost_usd += float(total)
             model = message.get("model")
             if isinstance(model, str) and model:
                 self.model = model  # last one wins: the model the session is on now
@@ -354,7 +367,7 @@ class StatsStore:
             "gen": 0,
             "stale": True,
             "sessions": 0,
-            "totals": {"in": 0, "out": 0, "calls": 0, "messages": 0, "age_s": 0},
+            "totals": {"in": 0, "out": 0, "calls": 0, "messages": 0, "age_s": 0, "cost_micro": 0},
             "agents": [],
         }
 
@@ -392,6 +405,9 @@ class StatsStore:
                     # "provider/model" is too long for the device's 16-byte buffer;
                     # the provider half is the same for every model it will ever see.
                     "model": sanitize(tail.model.rsplit("/", 1)[-1], STATS_MODEL_LEN),
+                    # Integer micro-dollars: 1_000_000 == $1, so the device can print
+                    # two decimals with integer arithmetic and no rounding drift.
+                    "cost_micro": int(round(tail.cost_usd * 1000000)),
                 }
             )
 
@@ -402,9 +418,9 @@ class StatsStore:
         for path in [p for p in self._tails if p not in live]:
             del self._tails[path]
 
-        totals = {"in": 0, "out": 0, "calls": 0, "messages": 0, "age_s": 0}
+        totals = {"in": 0, "out": 0, "calls": 0, "messages": 0, "age_s": 0, "cost_micro": 0}
         for row in rows:
-            for key in ("in", "out", "calls", "messages"):
+            for key in ("in", "out", "calls", "messages", "cost_micro"):
                 totals[key] += row[key]
         if rows:
             totals["age_s"] = min(row["age_s"] for row in rows)  # youngest session
