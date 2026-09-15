@@ -16,6 +16,7 @@
 #include "esp_err.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "sdkconfig.h"
 
 #include "freertos/FreeRTOS.h"
@@ -41,6 +42,7 @@ static const char *TAG = "herdr";
 #define HERDR_POLL_STACK 8192
 
 static char s_url[128];
+static char s_url_stats[128]; /* the sessions endpoint lives on the same bridge */
 
 static herdr_status_t    s_state; /* guarded by s_lock */
 static SemaphoreHandle_t s_lock;
@@ -48,7 +50,20 @@ static TaskHandle_t      s_task;
 static bool              s_started;
 
 static int      s_fail;         /* consecutive failed polls */
+static uint32_t s_fail_total;   /* failed polls since boot */
+static uint32_t s_polls;        /* successful polls since boot */
+static uint32_t s_rtt_ms;       /* duration of the last successful GET */
 static uint32_t s_last_log_gen; /* gen reported by the last gen-level log line */
+
+/* Session stats are backed by a second endpoint that makes the bridge read the
+ * agents' own session logs, so it is fetched on a slow cadence rather than with
+ * every state poll, and a long run of failures clears `valid` so the stats view
+ * says "no data" instead of showing numbers that stopped being true. */
+#define HERDR_STATS_EVERY 5
+#define HERDR_STATS_FAILS_TO_DROP 6
+static herdr_sessions_t s_sessions; /* guarded by s_lock */
+static uint32_t         s_stats_fail;
+static bool             s_stats_ever; /* at least one /stats succeeded */
 static bool     s_gen_logged;
 
 /* Body collector for one poll; lives on the poll task's stack. */
@@ -154,10 +169,12 @@ static bool parse_state(const char *text, herdr_status_t *out)
             continue;
         }
         herdr_agent_t *a = &out->agents[shown];
+        const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(je, "id"));
         const char *label = cJSON_GetStringValue(cJSON_GetObjectItem(je, "label"));
         const char *kind = cJSON_GetStringValue(cJSON_GetObjectItem(je, "kind"));
 
-        /* The bridge already ASCII-sanitised and truncated both strings. */
+        /* The bridge already ASCII-sanitised and truncated all of these. */
+        strlcpy(a->id, id ? id : "", sizeof a->id);
         strlcpy(a->label, label ? label : "", sizeof a->label);
         strlcpy(a->kind, kind ? kind : "", sizeof a->kind);
         a->state = state_from_json(cJSON_GetObjectItem(je, "status"));
@@ -169,6 +186,82 @@ static bool parse_state(const char *text, herdr_status_t *out)
     out->overflow = total - (total < CONFIG_HERDR_UI_MAX_AGENTS ? total : CONFIG_HERDR_UI_MAX_AGENTS);
 
     cJSON_Delete(root);
+    return true;
+}
+
+/* One agent entry as it arrives: the bridge sends pane ids, and the UI's rows
+ * come from the state document, so they are matched up by id before publishing. */
+typedef struct {
+    char            id[24];
+    herdr_session_t s;
+} stats_entry_t;
+
+static uint32_t json_u32(const cJSON *obj, const char *name)
+{
+    const cJSON *v = cJSON_GetObjectItem(obj, name);
+
+    if (!cJSON_IsNumber(v) || v->valuedouble < 0) {
+        return 0;
+    }
+    return (v->valuedouble > 4294967295.0) ? 0xFFFFFFFFu : (uint32_t)v->valuedouble;
+}
+
+/* Forgiving by design: a field the bridge does not send (or sends oddly) leaves
+ * that number at zero rather than failing the whole document, because a partial
+ * stats page is still worth showing. */
+static bool parse_stats(const char *text, herdr_sessions_t *out, stats_entry_t *entries, int *n_entries)
+{
+    memset(out, 0, sizeof *out);
+    *n_entries = 0;
+
+    cJSON *root = cJSON_Parse(text);
+    if (root == NULL || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        return false;
+    }
+
+    const cJSON *v = cJSON_GetObjectItem(root, "v");
+    if (!cJSON_IsNumber(v) || v->valueint != 1) {
+        ESP_LOGW(TAG, "stats: unsupported wire version");
+        cJSON_Delete(root);
+        return false;
+    }
+
+    out->sessions = json_u32(root, "sessions");
+
+    const cJSON *totals = cJSON_GetObjectItem(root, "totals");
+    if (cJSON_IsObject(totals)) {
+        out->tokens_in  = json_u32(totals, "in");
+        out->tokens_out = json_u32(totals, "out");
+        out->messages   = json_u32(totals, "messages");
+        out->tool_calls = json_u32(totals, "calls");
+        out->age_s      = json_u32(totals, "age_s");
+    }
+
+    const cJSON *agents = cJSON_GetObjectItem(root, "agents");
+    const int     total = cJSON_IsArray(agents) ? cJSON_GetArraySize(agents) : 0;
+    for (int i = 0; i < total && *n_entries < HERDR_MAX_AGENTS; i++) {
+        const cJSON *a = cJSON_GetArrayItem(agents, i);
+
+        if (!cJSON_IsObject(a)) {
+            continue;
+        }
+        const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(a, "id"));
+        const char *model = cJSON_GetStringValue(cJSON_GetObjectItem(a, "model"));
+        stats_entry_t *e = &entries[*n_entries];
+
+        strlcpy(e->id, id ? id : "", sizeof e->id);
+        e->s.tokens_in  = json_u32(a, "in");
+        e->s.tokens_out = json_u32(a, "out");
+        e->s.messages   = json_u32(a, "messages");
+        e->s.tool_calls = json_u32(a, "calls");
+        e->s.age_s      = json_u32(a, "age_s");
+        strlcpy(e->s.model, model ? model : "", sizeof e->s.model);
+        (*n_entries)++;
+    }
+
+    cJSON_Delete(root);
+    out->valid = true;
     return true;
 }
 
@@ -220,10 +313,62 @@ static void log_gen_if_changed(const herdr_status_t *s)
 static void poll_failed(void)
 {
     s_fail++;
+    s_fail_total++;
     ESP_LOGW(TAG, "poll failed (%d consecutive)", s_fail);
     if (s_fail >= 3) {
         publish_offline();
     }
+}
+
+/* Fetches /stats and folds it into the shared struct, matching entries to the
+ * rows the UI already has by pane id. Never touches the state document. */
+static void poll_stats(void)
+{
+    struct poll_ctx ctx = { 0 };
+    const esp_http_client_config_t cfg = {
+        .url = s_url_stats,
+        .timeout_ms = 3000,
+        .method = HTTP_METHOD_GET,
+        .event_handler = http_evt,
+        .user_data = &ctx,
+        .disable_auto_redirect = true,
+    };
+    herdr_sessions_t next;
+    stats_entry_t    entries[HERDR_MAX_AGENTS];
+    int              n_entries = 0;
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (client == NULL) {
+        return;
+    }
+    const esp_err_t err = esp_http_client_perform(client);
+    const int       status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+
+    if (err != ESP_OK || status != 200 || ctx.truncated || !parse_stats(ctx.buf, &next, entries, &n_entries)) {
+        if (++s_stats_fail >= HERDR_STATS_FAILS_TO_DROP) {
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            s_sessions.valid = false;
+            xSemaphoreGive(s_lock);
+        }
+        return;
+    }
+    s_stats_fail = 0;
+    s_stats_ever = true;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    for (int i = 0; i < s_state.count && i < HERDR_MAX_AGENTS; i++) {
+        for (int j = 0; j < n_entries; j++) {
+            if (strcmp(entries[j].id, s_state.agents[i].id) == 0) {
+                next.per[i] = entries[j].s;
+                break;
+            }
+        }
+    }
+    s_sessions = next;
+    xSemaphoreGive(s_lock);
+
+    ESP_LOGI(TAG, "GET %s -> 200 (%d bytes, %u sessions)", s_url_stats, (int)ctx.len, next.sessions);
 }
 
 static void poll_once(void)
@@ -246,7 +391,12 @@ static void poll_once(void)
         return;
     }
 
-    esp_err_t err = esp_http_client_perform(client);
+    /* The round trip the overlay shows is the request itself, not the wait for
+     * the next poll: connect + GET + body, measured with the same clock the
+     * other tasks use. */
+    const int64_t t0 = esp_timer_get_time();
+    esp_err_t     err = esp_http_client_perform(client);
+    const int64_t rtt_us = esp_timer_get_time() - t0;
     int status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
 
@@ -262,6 +412,8 @@ static void poll_once(void)
     }
 
     s_fail = 0;
+    s_polls++;
+    s_rtt_ms = (uint32_t)(rtt_us / 1000);
     publish(&next);
     log_gen_if_changed(&next);
 }
@@ -275,6 +427,10 @@ static void herdr_poll(void *arg)
             vTaskDelay(pdMS_TO_TICKS(500));
         }
 
+        static uint32_t tick;
+        if ((tick++ % HERDR_STATS_EVERY) == 0) {
+            poll_stats();
+        }
         poll_once();
 
         /* Sleep for the poll period, but let a screen tap cut it short: the
@@ -292,6 +448,7 @@ void herdr_client_start(void)
     s_started = true;
 
     snprintf(s_url, sizeof s_url, "http://%s:%d/state", CONFIG_HERDR_BRIDGE_HOST, CONFIG_HERDR_BRIDGE_PORT);
+    snprintf(s_url_stats, sizeof s_url_stats, "http://%s:%d/stats", CONFIG_HERDR_BRIDGE_HOST, CONFIG_HERDR_BRIDGE_PORT);
 
     s_lock = xSemaphoreCreateMutex();
     if (s_lock == NULL) {
@@ -328,6 +485,44 @@ void herdr_client_poll_now(void)
     }
 }
 
+void herdr_client_stats(herdr_link_stats_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    /* The totals are written by the poll task outside the lock (they are plain
+     * 32-bit counters, and the lock exists for the agent rows, not for these),
+     * so they are read as-is; gen and online are the published state and are
+     * read under it. A counter moving between two reads of this function is a
+     * display artefact at worst. */
+    herdr_link_stats_t st = {
+        .polls      = s_polls,
+        .failures   = (uint32_t)s_fail,
+        .fail_total = s_fail_total,
+        .rtt_ms     = s_rtt_ms,
+    };
+
+    if (s_lock != NULL) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        st.gen    = s_state.gen;
+        st.online = s_state.online;
+        xSemaphoreGive(s_lock);
+    }
+    *out = st;
+}
+
 #if CONFIG_HERDR_UI_MAX_AGENTS > HERDR_MAX_AGENTS
 #error "CONFIG_HERDR_UI_MAX_AGENTS exceeds HERDR_MAX_AGENTS"
 #endif
+
+bool herdr_stats_get(herdr_sessions_t *out)
+{
+    if (out == NULL || s_lock == NULL || !s_stats_ever) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *out = s_sessions;
+    xSemaphoreGive(s_lock);
+    return true;
+}

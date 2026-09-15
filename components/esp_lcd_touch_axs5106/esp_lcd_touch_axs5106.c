@@ -14,7 +14,26 @@
 
 static const char *TAG = "esp_lcd_touch_axs5106";
 
+/* The controller can latch an interrupt that it never gets to clear: the first
+ * read after a touch fails, INT stays asserted, and every later read then fails
+ * too. Measured on this board as bursts of eight to ten NACKs per touch and a
+ * single recognised gesture in a whole session of tapping. Unlike the IMU on the
+ * same bus, this part has a reset pin, so the driver recovers by resetting it.
+ *
+ * The first failure is the one worth surviving: a transaction issued while the
+ * controller is still assembling a report is NACKed, and a retry a few
+ * milliseconds later succeeds. */
+#define AXS5106_FAILS_BEFORE_RESET 8
+#define AXS5106_READ_ATTEMPTS 2
+#define AXS5106_RETRY_GAP_MS 3
+
 #define TOUCH_AXS5106_TOUCH_POINTS_REG (0X01)
+/* Identification register, per the Arduino driver shipped with this panel. */
+#define AXS5106_ID_REG (0x08)
+
+/* The interrupt level seen by the previous read, so a sample is taken once per
+ * assertion rather than for as long as the line stays asserted. */
+static int8_t s_int_level = -1;
 #define TOUCH_AXS5106_TOUCH_P1_XH_REG (0x03)
 #define TOUCH_AXS5106_TOUCH_P1_XL_REG (0x04)
 #define TOUCH_AXS5106_TOUCH_P1_YH_REG (0x05)
@@ -98,6 +117,19 @@ esp_err_t esp_lcd_touch_new_i2c_axs5106(i2c_master_dev_handle_t dev_handle, cons
     ret = touch_axs5106_reset(esp_lcd_touch_axs5106);
     ESP_GOTO_ON_ERROR(ret, err, TAG, "AXS5106 reset failed");
 
+    /* The Arduino driver for this panel reads this register at init and only
+     * prints it when non-zero, so 0x00 is expected — what matters is that the
+     * controller answered at all. The ESP-IDF driver never checked, which is one
+     * reason a half-initialised part went unnoticed as long as it did. */
+    {
+        uint8_t id = 0;
+        if (touch_axs5106_i2c_read(esp_lcd_touch_axs5106, AXS5106_ID_REG, &id, 1) == ESP_OK) {
+            ESP_LOGI(TAG, "controller id register reads 0x%02x", id);
+        } else {
+            ESP_LOGW(TAG, "no answer from the controller after reset");
+        }
+    }
+
     /* Init controller */
     ret = touch_axs5106_init(esp_lcd_touch_axs5106);
     ESP_GOTO_ON_ERROR(ret, err, TAG, "AXS5106 init failed");
@@ -117,6 +149,34 @@ err:
     return ret;
 }
 
+/* Reads with a short retry, and resets the controller when it has stopped
+ * answering altogether. Never returns the stale previous sample: the caller
+ * treats a failure as "no touch", which is what a stuck controller means. */
+static esp_err_t axs5106_read_recovering(esp_lcd_touch_handle_t tp, uint8_t reg, uint8_t *data, uint8_t len)
+{
+    static uint8_t fail_streak;
+
+    for (int attempt = 0; attempt < AXS5106_READ_ATTEMPTS; attempt++) {
+        if (touch_axs5106_i2c_read(tp, reg, data, len) == ESP_OK) {
+            fail_streak = 0;
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(AXS5106_RETRY_GAP_MS));
+    }
+
+    /* The report is still pending in the controller, and it will not assert the
+     * line again for data it has already announced. Forgetting the level lets the
+     * next poll retry, so one badly timed read does not cost the whole touch. */
+    s_int_level = -1;
+
+    if (++fail_streak >= AXS5106_FAILS_BEFORE_RESET) {
+        fail_streak = 0;
+        ESP_LOGW(TAG, "controller stopped answering: resetting it");
+        ESP_RETURN_ON_ERROR(touch_axs5106_reset(tp), TAG, "reset failed");
+    }
+    return ESP_ERR_TIMEOUT;
+}
+
 static esp_err_t esp_lcd_touch_axs5106_read_data(esp_lcd_touch_handle_t tp)
 {
     esp_err_t err;
@@ -126,25 +186,31 @@ static esp_err_t esp_lcd_touch_axs5106_read_data(esp_lcd_touch_handle_t tp)
 
     assert(tp != NULL);
 
-    /* Only talk to the controller when its interrupt line says there is
-     * something to read.
+    /* Read once per interrupt assertion — the way the vendor's own Arduino driver
+     * for this panel does it: an ISR on the falling edge sets a flag, and the
+     * read consumes the flag before touching the bus.
      *
-     * The vendor's driver polled the part on every display input period whether
-     * or not anyone was touching it, and on this board the controller stopped
-     * acknowledging after roughly 1450 continuous reads (about 70 s at 50 ms) —
-     * which also knocked out the QMI8658A sharing the bus, because a failing
-     * transaction churns the bus (AGENTS.md §7, §11). INT exists precisely to
-     * avoid that: idle panels now cost no I2C traffic at all, and a touch
-     * asserts INT and is read as before. */
+     * Reading whenever the line merely *is* asserted (what this driver did first)
+     * hammers the controller for the whole duration of a touch, and it answers
+     * with NACKs: the panel log showed read failures only ever at the moment of a
+     * touch, two attempts each, over and over, with no sample ever obtained.
+     * Waiting for a fresh assertion makes each read happen when the controller
+     * says a report is ready, which is both gentler and correctly timed.
+     *
+     * Idle panels still cost nothing: with no finger down the line never asserts,
+     * so the IMU on this shared bus gets the silence it needs (AGENTS.md §11). */
     if (tp->config.int_gpio_num != GPIO_NUM_NC) {
         const int  level  = gpio_get_level(tp->config.int_gpio_num);
-        const bool active = tp->config.levels.interrupt ? 1 : 0;
-        if (level != active) {
-            return ESP_OK; /* nothing to read */
+        const int  active = tp->config.levels.interrupt ? 1 : 0;
+        const bool fresh  = (level == active) && (s_int_level != active);
+
+        s_int_level = (int8_t)level;
+        if (!fresh) {
+            return ESP_OK; /* no new report */
         }
     }
 
-    err = touch_axs5106_i2c_read(tp, TOUCH_AXS5106_TOUCH_POINTS_REG, data, 14);
+    err = axs5106_read_recovering(tp, TOUCH_AXS5106_TOUCH_POINTS_REG, data, 14);
     ESP_RETURN_ON_ERROR(err, TAG, "I2C read error!");
     points = data[1];
     points = points & 0x0F;
@@ -255,6 +321,15 @@ static esp_err_t touch_axs5106_init(esp_lcd_touch_handle_t tp)
     return ESP_OK;
 }
 
+/* Reset timing is the vendor's own, from the Arduino driver that ships with this
+ * panel (Arduino/libraries/esp_lcd_touch_axs5106l): 200 ms asserted, then 300 ms
+ * of settle time. The ESP-IDF driver's 10 ms pulse is far too short — the part
+ * comes back up enough to ACK and report a point count while leaving the
+ * coordinate registers at zero, which is precisely the "raw n=1 p0=(172,0)" the
+ * panel produced, and it is not something any read strategy can recover from. */
+#define AXS5106_RESET_ASSERT_MS 200
+#define AXS5106_RESET_SETTLE_MS 300
+
 static esp_err_t touch_axs5106_reset(esp_lcd_touch_handle_t tp)
 {
     assert(tp != NULL);
@@ -262,9 +337,9 @@ static esp_err_t touch_axs5106_reset(esp_lcd_touch_handle_t tp)
     if (tp->config.rst_gpio_num != GPIO_NUM_NC)
     {
         ESP_RETURN_ON_ERROR(gpio_set_level(tp->config.rst_gpio_num, tp->config.levels.reset), TAG, "GPIO set level error!");
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(AXS5106_RESET_ASSERT_MS));
         ESP_RETURN_ON_ERROR(gpio_set_level(tp->config.rst_gpio_num, !tp->config.levels.reset), TAG, "GPIO set level error!");
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(AXS5106_RESET_SETTLE_MS));
     }
 
     return ESP_OK;

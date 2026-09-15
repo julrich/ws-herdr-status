@@ -169,6 +169,9 @@ static esp_err_t lvgl_start(void)
         .disp = disp,
         .handle = s_touch,
     };
+    /* The port's own pointer indev is the whole input path: this panel reports a
+     * single touch, so LVGL's click / long-press / gesture events cover the
+     * companion's vocabulary (AGENTS.md §11). */
     ESP_RETURN_ON_FALSE(lvgl_port_add_touch(&touch_cfg) != NULL, ESP_FAIL, TAG, "lvgl_port_add_touch failed");
 
     return ESP_OK;

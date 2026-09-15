@@ -3,7 +3,9 @@
 
 Reads the live agent status from the herdr daemon over its Unix socket and serves a
 tiny JSON document (``GET /state``) over HTTP on the LAN so the Waveshare
-ESP32-C6-Touch-LCD-1.47 companion can poll it without a USB link.
+ESP32-C6-Touch-LCD-1.47 companion can poll it without a USB link. A second document,
+``GET /stats``, carries per-session token counts summed from the agent harness's own
+session logs (see the "omp session logs" section below).
 
 Python 3 standard library only -- no third-party imports.
 
@@ -16,6 +18,7 @@ costs nothing at the 0.5 s poll cadence.
 Usage:
     python3 bridge/herdr_status_bridge.py
     python3 bridge/herdr_status_bridge.py --once
+    python3 bridge/herdr_status_bridge.py --once --stats
     python3 bridge/herdr_status_bridge.py --fixture bridge/fixtures/blocked.json
 """
 
@@ -40,6 +43,15 @@ STALE_AFTER_S = 5.0
 
 #: Minimum spacing between "poll failed" warnings on stderr.
 FAIL_WARN_PERIOD_S = 30.0
+
+#: Period of the thread that rebuilds the /stats document. It only reads the bytes
+#: appended to the session logs since the previous pass (0.03 ms for the three live
+#: logs with nothing appended), so this never touches the request path.
+STATS_REFRESH_S = 1.0
+
+#: Longest model string put on the wire: the device's buffer is 16 bytes with the NUL
+#: (HERDR_MODEL_LEN in main/herdr_status_types.h).
+STATS_MODEL_LEN = 15
 
 
 class BridgeError(Exception):
@@ -169,8 +181,26 @@ def build_state(socket_path):
         return None
 
     tabs_by_id, ws_by_id = _label_maps(snapshot)
-    agents = [wire_agent(a, tabs_by_id, ws_by_id) for a in raw_agents if isinstance(a, dict)]
-    return {"agents": sort_agents(agents)}
+    agents = []
+    paths = {}
+    for a in raw_agents:
+        if not isinstance(a, dict):
+            continue
+        agents.append(wire_agent(a, tabs_by_id, ws_by_id))
+        # herdr is the only thing that knows which session log belongs to which pane:
+        # agent_session is {"kind": "path", "value": "/…/<session>.jsonl"}. Everything
+        # the stats document says about an agent is derived from that one file.
+        session = a.get("agent_session")
+        if isinstance(session, dict) and session.get("kind") == "path":
+            value = session.get("value")
+            if isinstance(value, str) and value:
+                paths[agents[-1]["id"]] = value
+
+    agents = sort_agents(agents)
+    # Keyed and ordered like the wire rows, so /stats rows line up with /state rows and
+    # the device can match them by id. An agent with no session path simply has no row.
+    sessions = {a["id"]: paths[a["id"]] for a in agents if a["id"] in paths}
+    return {"agents": agents, "sessions": sessions}
 
 
 def load_fixture(path):
@@ -189,6 +219,238 @@ def load_fixture(path):
     return sort_agents(agents)
 
 
+# --- omp session logs, and the /stats document ------------------------------
+
+# The agent harness (omp) appends one newline-delimited JSON record per event to
+# ~/.omp/agent/sessions/<slug>/<ts>_<uuid>.jsonl -- 45 files / 58 MB on the machine
+# this was written for, the largest 11 MB. Reading all of them takes ~440 ms, so a
+# request must never do it: a thread folds in the appended bytes every STATS_REFRESH_S
+# and the handler serves the finished document.
+#
+# The one pass that does read a log in full is the first one after startup (~110 ms for
+# the three live agents here). json.loads holds the GIL while it runs, so a request that
+# lands in that window can take tens of ms instead of the ~0.6 ms a warm one takes; that
+# shows up once, on the first second after the bridge starts.
+#
+# omp's own ~/.omp/stats.db is deliberately NOT used: it is pre-aggregated, but only
+# as fresh as the last `omp stats` run (29 h stale when this was written), so it is
+# useless as a live source.
+
+
+def _token_count(v):
+    """Usage counters are integers, but never trust a file this process does not own."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return 0
+    return int(v)
+
+
+class SessionTail:
+    """Incremental parser state for one omp session log.
+
+    A live session only appends (a few KB in bursts), so the offset is the whole trick:
+    only the bytes written since the previous pass are read and folded in. Re-reading
+    instead would cost 33 ms for the 4.5 MB log of a busy session and 442 ms for all 45
+    logs on this machine, against 0.03 ms for a pass with nothing to read and 3.7 ms for
+    one that reads back a 60 KB burst. Records are newline-delimited and can be tens of
+    KB, so the last line of a read is often a record still being written; it is kept in
+    ``partial`` and prepended to the next read instead of being parsed (and the read
+    offset still advances past it, or it would be read twice).
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.offset = 0
+        self.partial = b""
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.calls = 0
+        self.messages = 0
+        self.model = ""
+        self.mtime = 0.0
+
+    def refresh(self):
+        """Fold the appended bytes in. Raises OSError when the file cannot be read."""
+        st = os.stat(self.path)
+        if st.st_size < self.offset:
+            # Truncated, rotated or replaced under us: start over rather than resume in
+            # the middle of a record. The totals stay correct because they are rebuilt
+            # from the first byte.
+            self.offset = 0
+            self.partial = b""
+            self.tokens_in = 0
+            self.tokens_out = 0
+            self.calls = 0
+            self.messages = 0
+            self.model = ""
+        if st.st_size > self.offset:
+            with open(self.path, "rb") as fh:
+                fh.seek(self.offset)
+                data = fh.read()
+            # Advance by what was actually read, not by st.st_size: a session writing
+            # while we read gives us more bytes than the stat promised, and counting
+            # those twice would double whatever the last record carried.
+            self.offset += len(data)
+            lines = (self.partial + data).split(b"\n")
+            self.partial = lines.pop()
+            self._fold(lines)
+        self.mtime = st.st_mtime
+
+    def _fold(self, lines):
+        """Fold complete records into the running totals.
+
+        Only these fields are read, nothing else is kept, and the parsed record is
+        dropped as soon as it has been looked at: the record type, the tool-execution
+        marker, and message.{model,usage.{input,output,cacheRead,cacheWrite}}. The
+        records also carry the whole conversation, and none of it leaves this process.
+        """
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue  # an unreadable record is skipped, never fatal
+            if not isinstance(rec, dict):
+                continue
+            kind = rec.get("type")
+            if kind == "custom":
+                if rec.get("customType") == "tool_execution_start":
+                    self.calls += 1  # one tool invocation
+                continue
+            if kind != "message":
+                continue
+            message = rec.get("message")
+            if not isinstance(message, dict):
+                continue
+            usage = message.get("usage")
+            if not isinstance(usage, dict):
+                continue  # user and tool-result messages carry model output, not usage
+            self.messages += 1
+            # Cache reads and writes are prompt tokens too, they are just billed as
+            # cache: omp's own totalTokens is exactly these four numbers added up, so
+            # counting only `input` would report a long session as nearly free.
+            self.tokens_in += (
+                _token_count(usage.get("input"))
+                + _token_count(usage.get("cacheRead"))
+                + _token_count(usage.get("cacheWrite"))
+            )
+            self.tokens_out += _token_count(usage.get("output"))
+            model = message.get("model")
+            if isinstance(model, str) and model:
+                self.model = model  # last one wins: the model the session is on now
+
+
+class StatsStore:
+    """The /stats document, rebuilt by its own thread and served as a locked copy.
+
+    ``_tails`` is only ever touched by that one thread, so it needs no lock of its
+    own; the lock covers the published document, which is what the HTTP threads read.
+    No file I/O ever happens while it is held.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._tails = {}
+        self._gen = 0
+        self._doc = {
+            "gen": 0,
+            "stale": True,
+            "sessions": 0,
+            "totals": {"in": 0, "out": 0, "calls": 0, "messages": 0, "age_s": 0},
+            "agents": [],
+        }
+
+    def refresh(self, sessions, stale):
+        """Rebuild the document from the session files behind ``sessions``.
+
+        ``sessions`` maps pane id to log path, in the order /state lists its agents.
+        """
+        # Wall clock, like st_mtime: time.monotonic() has an arbitrary origin and would
+        # make every age come out as "just now".
+        now = time.time()
+        rows = []
+        for pane_id, path in sessions.items():
+            tail = self._tails.get(path)
+            if tail is None:
+                tail = self._tails[path] = SessionTail(path)
+            try:
+                tail.refresh()
+            except OSError:
+                # Missing, renamed or unreadable right now. The device draws the row
+                # with zeros, so drop it; forgetting the state means a file that comes
+                # back is read from its first byte instead of from a stale offset.
+                del self._tails[path]
+                continue
+            rows.append(
+                {
+                    "id": pane_id,
+                    "in": tail.tokens_in,
+                    "out": tail.tokens_out,
+                    "calls": tail.calls,
+                    "messages": tail.messages,
+                    # The mtime of the log IS the session's last activity: it is
+                    # appended to on every event, and left alone once the agent stops.
+                    "age_s": max(0, int(now - tail.mtime)),
+                    # "provider/model" is too long for the device's 16-byte buffer;
+                    # the provider half is the same for every model it will ever see.
+                    "model": sanitize(tail.model.rsplit("/", 1)[-1], STATS_MODEL_LEN),
+                }
+            )
+
+        # Sessions end and herdr starts new ones under new paths; without this the table
+        # would grow for as long as the bridge runs. An agent herdr still reports keeps
+        # its state, so a poll that fails while herdr is down never resets the counters.
+        live = set(sessions.values())
+        for path in [p for p in self._tails if p not in live]:
+            del self._tails[path]
+
+        totals = {"in": 0, "out": 0, "calls": 0, "messages": 0, "age_s": 0}
+        for row in rows:
+            for key in ("in", "out", "calls", "messages"):
+                totals[key] += row[key]
+        if rows:
+            totals["age_s"] = min(row["age_s"] for row in rows)  # youngest session
+
+        with self._lock:
+            self._gen += 1
+            # A fresh dict per pass, never a mutation of the published one: a handler
+            # that is mid-dump can then never see half a document.
+            self._doc = {
+                "gen": self._gen,
+                "stale": stale,
+                "sessions": len(rows),
+                "totals": totals,
+                "agents": rows,
+            }
+
+    def snapshot(self):
+        """Short locked read: the document is already built, so this only copies."""
+        with self._lock:
+            return self._doc.copy()
+
+
+def stats_body(snap):
+    """The exact /stats body: version, generation, staleness, sessions, totals, rows."""
+    return {
+        "v": 1,
+        "gen": snap["gen"],
+        "stale": snap["stale"],
+        "sessions": snap["sessions"],
+        "totals": snap["totals"],
+        "agents": snap["agents"],
+    }
+
+
+def stats_loop(stats, store, interval):
+    """Daemon loop: keep the /stats document in step with the session logs.
+
+    The pane -> log map comes from the last herdr poll, so this thread never talks to
+    herdr itself; it only ever reads bytes that were appended since the last pass.
+    """
+    while True:
+        sessions, stale = store.stats_inputs()
+        stats.refresh(sessions, stale)
+        time.sleep(interval)
+
+
 # --- shared state -----------------------------------------------------------
 
 
@@ -198,6 +460,7 @@ class StateStore:
     def __init__(self, poll_period=0.5):
         self._lock = threading.Lock()
         self._agents = []
+        self._sessions = {}
         self._gen = 0
         self._ok_at = None
         self._fixture = None
@@ -206,10 +469,11 @@ class StateStore:
 
     # -- poll thread side --
 
-    def publish(self, agents):
+    def publish(self, agents, sessions):
         """Record a successful poll."""
         with self._lock:
             self._agents = agents
+            self._sessions = sessions
             self._gen += 1
             self._ok_at = time.monotonic()
 
@@ -225,13 +489,22 @@ class StateStore:
     # -- fixture mode --
 
     def set_fixture(self, agents):
-        """Serve a fixed agent list; ok_at stays fresh so the wire is never stale."""
+        """Serve a fixed agent list; ok_at stays fresh so the wire is never stale.
+
+        A fixture only carries the /state fields, so /stats has no session to describe
+        and reports zero sessions while the bridge runs in this mode.
+        """
         with self._lock:
             self._fixture = agents
             self._agents = agents
+            self._sessions = {}
             self._ok_at = None
 
     # -- HTTP side --
+
+    def _is_stale(self):
+        """True when no successful poll is recent enough (the caller holds the lock)."""
+        return self._ok_at is None or (time.monotonic() - self._ok_at > STALE_AFTER_S)
 
     def snapshot(self):
         """Short locked read: in fixture mode bumping gen per /state request."""
@@ -240,8 +513,20 @@ class StateStore:
                 self._gen += 1
                 stale = False
             else:
-                stale = self._ok_at is None or (time.monotonic() - self._ok_at > STALE_AFTER_S)
+                stale = self._is_stale()
             return {"gen": self._gen, "stale": stale, "agents": list(self._agents)}
+
+    def stats_inputs(self):
+        """Locked read for the stats thread: the pane -> session log map, and staleness.
+
+        Staleness mirrors /state on purpose: both documents are built from the same
+        poll, and herdr is the only source for which log belongs to which pane, so an
+        unreachable herdr makes the stats stale too even though the logs still read.
+        """
+        with self._lock:
+            if self._fixture is not None:
+                return {}, False
+            return dict(self._sessions), self._is_stale()
 
     def agent_count(self):
         with self._lock:
@@ -261,7 +546,7 @@ def poll_loop(store, socket_path, interval):
             if state is None:
                 store.note_failure("session.snapshot returned no agents list")
             else:
-                store.publish(state["agents"])
+                store.publish(state["agents"], state["sessions"])
         except (BridgeError, OSError) as exc:
             store.note_failure(str(exc))
         time.sleep(interval)
@@ -293,6 +578,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             status = 200
             self._respond(status, "application/json", body)
             count = len(snap["agents"])
+        elif path == "/stats":
+            snap = self.server.stats.snapshot()
+            body = json.dumps(stats_body(snap)).encode("utf-8")
+            status = 200
+            self._respond(status, "application/json", body)
+            count = snap["sessions"]
         elif path == "/healthz":
             status = 200
             self._respond(status, "text/plain", b"ok\n")
@@ -313,8 +604,9 @@ class BridgeServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, store):
+    def __init__(self, address, store, stats):
         self.store = store
+        self.stats = stats
         super().__init__(address, BridgeHandler)
 
 
@@ -329,11 +621,19 @@ def parse_args(argv):
     parser.add_argument("--interval", type=float, default=0.5, help="herdr poll period in seconds (default 0.5)")
     parser.add_argument("--fixture", default=None, help="serve agents from this JSON file instead of polling herdr")
     parser.add_argument("--once", action="store_true", help="print one /state body and exit")
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="with --once, print the /stats body instead of the /state body",
+    )
     return parser.parse_args(argv)
 
 
 def run_once(args):
-    """Print one /state body to stdout; exit 0 on success, 1 when herdr is unreachable."""
+    """Print one /state body -- or, with --stats, one /stats body -- and exit.
+
+    Exits 0 on success, 1 when herdr is unreachable.
+    """
     socket_path = resolve_socket_path(args.socket)
     store = StateStore()
     if args.fixture:
@@ -351,9 +651,17 @@ def run_once(args):
         if state is None:
             print("ERROR: herdr %s returned no usable snapshot" % socket_path, file=sys.stderr)
             return 1
-        store.publish(state["agents"])
+        store.publish(state["agents"], state["sessions"])
 
-    print(json.dumps(state_body(store.snapshot())))
+    if args.stats:
+        # One pass, right here: the first one reads every session log in full (~40 ms
+        # for the live ones), which is exactly why the server does this in a thread.
+        stats = StatsStore()
+        sessions, stale = store.stats_inputs()
+        stats.refresh(sessions, stale)
+        print(json.dumps(stats_body(stats.snapshot())))
+    else:
+        print(json.dumps(state_body(store.snapshot())))
     return 0
 
 
@@ -364,6 +672,7 @@ def main(argv=None):
 
     socket_path = resolve_socket_path(args.socket)
     store = StateStore(poll_period=args.interval)
+    stats = StatsStore()
 
     if args.fixture:
         try:
@@ -381,6 +690,15 @@ def main(argv=None):
         ).start()
         source = "poll=%.2fs" % args.interval
 
+    # Always running: /stats is an endpoint of its own, and a pass that finds nothing
+    # appended still costs a stat() per session log.
+    threading.Thread(
+        target=stats_loop,
+        args=(stats, store, STATS_REFRESH_S),
+        name="herdr-stats",
+        daemon=True,
+    ).start()
+
     print(
         "herdr-status-bridge: socket=%s http=%s:%d %s"
         % (socket_path, args.bind, args.port, source),
@@ -388,7 +706,7 @@ def main(argv=None):
         flush=True,
     )
 
-    server = BridgeServer((args.bind, args.port), store)
+    server = BridgeServer((args.bind, args.port), store, stats)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -22,6 +22,7 @@
 #include "lvgl.h"
 
 #include "herdr_status_types.h"
+#include "ui_stats.h"
 #include "ui_companion.h"
 
 /* ------------------------------------------------------------------ */
@@ -35,6 +36,8 @@
 #define BODY_CX 86
 #define BODY_CY 108
 #define BODY_D  120
+#define LIST_Y0 190      /* portrait list geometry, from ui_layout_init() */
+#define LIST_ROW_H 24
 #define RING_D  138
 #define MOUTH_CY 126
 
@@ -107,6 +110,40 @@ void herdr_client_poll_now(void)
     g_poll_now_calls++;
 }
 
+/* The diagnostics and session getters ui_companion.c reads. Their real
+ * implementations live behind esp_* (main/herdr_client.c, ui_rotation.c,
+ * ui_input.c, ui_device.c); here they are plain settable state. */
+static herdr_link_stats_t  g_link;
+static herdr_imu_stats_t   g_imu;
+static herdr_sessions_t    g_sessions;
+
+void herdr_client_stats(herdr_link_stats_t *out)
+{
+    if(out != NULL) *out = g_link;
+}
+
+void ui_rotation_stats_get(herdr_imu_stats_t *out)
+{
+    if(out != NULL) *out = g_imu;
+}
+
+bool herdr_stats_get(herdr_sessions_t *out)
+{
+    if(out == NULL) return false;
+    *out = g_sessions;
+    return g_sessions.valid;
+}
+
+uint32_t ui_device_free_heap(void)
+{
+    return 180u * 1024u;
+}
+
+uint32_t ui_device_min_free_heap(void)
+{
+    return 150u * 1024u;
+}
+
 /* ------------------------------------------------------------------ */
 /* Display + pointer input                                             */
 /* ------------------------------------------------------------------ */
@@ -143,6 +180,25 @@ static void post_press(int x, int y)
 static void post_release(void)
 {
     g_ptr_state = LV_INDEV_STATE_REL;
+}
+
+static void render(int iterations);
+
+/* Drag the scripted pointer, one tick per step. LVGL decides a gesture from the
+ * travel distance and the velocity across reads (LV_INDEV_DEF_GESTURE_LIMIT,
+ * LV_INDEV_DEF_GESTURE_MIN_VELOCITY), so a single jump would not register. */
+static void drag(int x0, int y0, int x1, int y1, int steps)
+{
+    post_press(x0, y0);
+    render(1);                       /* LVGL latches the press */
+
+    for (int i = 1; i <= steps; i++) {
+        post_press(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps);
+        render(1);
+    }
+
+    post_release();
+    render(2);
 }
 
 static void indev_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
@@ -259,6 +315,8 @@ static void set_agent(int i, const char *label, const char *kind, herdr_agent_st
 {
     herdr_agent_t *a = &g_status.agents[i];
     memset(a, 0, sizeof *a);
+    /* The wire carries a pane id; the stats endpoint matches rows by it. */
+    snprintf(a->id, sizeof a->id, "w1:p%d", i + 1);
     snprintf(a->label, sizeof a->label, "%s", label);
     snprintf(a->kind, sizeof a->kind, "%s", kind);
     a->state   = state;
@@ -269,6 +327,20 @@ static void set_agent(int i, const char *label, const char *kind, herdr_agent_st
 static void load_scenario(const char *name)
 {
     memset(&g_status, 0, sizeof g_status);
+    memset(&g_link, 0, sizeof g_link);
+    memset(&g_imu, 0, sizeof g_imu);
+    memset(&g_sessions, 0, sizeof g_sessions);
+
+    g_link.gen      = 17285;
+    g_link.polls    = 400;
+    g_link.rtt_ms   = 12;
+    g_link.online   = true;
+    g_imu.running   = true;
+    g_imu.present   = true;
+    g_imu.rate_hz   = 10;
+    g_imu.axis      = 1;
+    g_imu.sign      = -1;
+    g_imu.calibrated = true;
     g_status.online = true;
     g_status.stale  = false;
     g_status.gen    = ++s_gen;
@@ -280,7 +352,9 @@ static void load_scenario(const char *name)
     }
     else if(strcmp(name, "working") == 0 || strcmp(name, "alive") == 0 || strcmp(name, "glint") == 0
             || strcmp(name, "motes") == 0
-            || strcmp(name, "land_working") == 0) {
+            || strcmp(name, "land_working") == 0
+            || strcmp(name, "view_switch") == 0 || strcmp(name, "overlay") == 0
+            || strcmp(name, "flourish") == 0) {
         set_agent(0, "PoC", "omp", HERDR_ST_WORKING, true);
         set_agent(1, "Docs pass", "claude", HERDR_ST_IDLE, false);
         g_status.count = 2;
@@ -302,7 +376,7 @@ static void load_scenario(const char *name)
         g_status.count  = 2;
         g_status.online = false;
     }
-    else if(strcmp(name, "overflow") == 0) {
+    else if(strcmp(name, "overflow") == 0 || strcmp(name, "paging") == 0) {
         static const char *labels[HERDR_MAX_AGENTS] = {
             "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"
         };
@@ -749,30 +823,151 @@ static void check_offline(result_t *r)
            "summary want \"no link\" got \"%s\"", got);
 }
 
+/* Six agents, four rows. The summary used to tack a "+2" on; paging reports the
+ * same overflow with the page marker, so that is what this now checks. */
 static void check_overflow(result_t *r)
 {
     char got[64];
-    EXPECT(r, assert_text_suffix(SUMMARY_Y_MIN, SUMMARY_Y_MAX, " +2", got, sizeof got),
-           "summary want suffix \" +2\" got \"%s\"", got);
+    EXPECT(r, assert_text_suffix(SUMMARY_Y_MIN, SUMMARY_Y_MAX, " p1/2", got, sizeof got),
+           "summary want a page marker \" p1/2\" got \"%s\"", got);
 }
 
 static void check_tap(result_t *r)
 {
-    /* Exercise the scripted pointer path first: press, release, let LVGL's
-     * indev timer process it. This must not crash. */
+    /* Press and release through the scripted pointer: LVGL's own click handling
+     * is the only path a tap takes on the device, so it is the path under test. */
+    g_poll_now_calls = 0;
     post_press(BODY_CX, BODY_CY);
     render(3);
     post_release();
-    render(3);
-
-    /* The asserted tap is the deterministic event path the harness contract
-     * names, so restart the counter first. */
-    g_poll_now_calls = 0;
-    lv_event_send(lv_scr_act(), LV_EVENT_CLICKED, NULL);
-    render(14); /* ~420 ms of virtual time */
+    render(4);
 
     EXPECT(r, g_poll_now_calls == 1,
            "herdr_client_poll_now calls = %d (want 1)", g_poll_now_calls);
+    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
+           "body pixel(%d,%d) want #%06X got #%06X",
+           BODY_CX, BODY_CY, (unsigned)expect_rgb(COL_WORKING),
+           (unsigned)pixel_at(BODY_CX, BODY_CY));
+}
+
+/* A tap must visibly react: the flourish ring expands past the face. Sampled
+ * just above the body, where the resting screen is pure background. */
+static void check_flourish(result_t *r)
+{
+    /* Beside the face at its own height: at rest that is bare background, and
+     * the expanding ring crosses it. The band above the headline is not usable
+     * here because WORKING twinkles motes there. */
+    const int probe_x = BODY_CX - BODY_D / 2 - 14;
+    const int probe_y = BODY_CY;
+
+    /* Let the mood-change burst finish first: its rings sweep this exact spot. */
+    render(60);
+
+    EXPECT(r, pixel_at(probe_x, probe_y) == expect_rgb(COL_BG),
+           "the probe beside the face was not background to begin with (#%06X)",
+           (unsigned)pixel_at(probe_x, probe_y));
+
+    ui_companion_on_tap();
+    render(6); /* 180 ms: the ring has grown past the probe */
+
+    EXPECT(r, pixel_at(probe_x, probe_y) != expect_rgb(COL_BG),
+           "no flourish ring beside the face after a tap (#%06X)",
+           (unsigned)pixel_at(probe_x, probe_y));
+
+    render(80); /* long after: everything must be back to rest */
+    EXPECT(r, pixel_at(probe_x, probe_y) == expect_rgb(COL_BG),
+           "the flourish never cleared (#%06X)", (unsigned)pixel_at(probe_x, probe_y));
+}
+
+/* Two views, swiped between. Leaving the mood view must hide the face; coming
+ * back must restore it, and the stats view has to be the other one. */
+static void check_view_switch(result_t *r)
+{
+    char got[32];
+
+    EXPECT(r, ui_companion_view() == UI_VIEW_MOOD, "started in view %s", ui_view_name(ui_companion_view()));
+    EXPECT(r, assert_text(0, 30, "WORKING", got, sizeof got),
+           "mood view headline want \"WORKING\" got \"%s\"", got);
+
+    g_poll_now_calls = 0;
+    drag(BODY_CX + 60, BODY_CY, BODY_CX - 60, BODY_CY, 4);   /* swipe left */
+
+    EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "swipe left gave view %s", ui_view_name(ui_companion_view()));
+    /* A swipe is not a tap, so it must not refresh from the bridge either. */
+    EXPECT(r, g_poll_now_calls == 0,
+           "a swipe also read as a tap (%d bridge polls)", g_poll_now_calls);
+    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_BG),
+           "the face is still drawn in the stats view (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
+    EXPECT(r, assert_text(0, 30, "STATS", got, sizeof got),
+           "stats view title want \"STATS\" got \"%s\"", got);
+
+    drag(BODY_CX + 60, BODY_CY, BODY_CX - 60, BODY_CY, 4);   /* two views: wraps back */
+    EXPECT(r, ui_companion_view() == UI_VIEW_MOOD, "wrapping gave view %s", ui_view_name(ui_companion_view()));
+    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
+           "the face did not come back (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
+
+    drag(BODY_CX - 60, BODY_CY, BODY_CX + 60, BODY_CY, 4);   /* swipe right */
+    EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "swipe right from mood gave view %s",
+           ui_view_name(ui_companion_view()));
+}
+
+/* Six agents, four rows: a vertical swipe has to page the list. */
+static void check_paging(result_t *r)
+{
+    char got[32];
+
+    EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "> Alpha", got, sizeof got),
+           "page 1 row 1 want \"> Alpha\" (the focused agent) got \"%s\"", got);
+    EXPECT(r, assert_text(LIST_Y0 + 3 * LIST_ROW_H + 2, LIST_Y0 + 3 * LIST_ROW_H + 15, "Delta", got, sizeof got),
+           "page 1 row 4 want \"Delta\" got \"%s\"", got);
+
+    drag(BODY_CX, BODY_CY + 40, BODY_CX, BODY_CY - 40, 4);   /* swipe up */
+
+    EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "Echo", got, sizeof got),
+           "page 2 row 1 want \"Echo\" got \"%s\"", got);
+    EXPECT(r, assert_text(LIST_Y0 + LIST_ROW_H + 2, LIST_Y0 + LIST_ROW_H + 15, "Foxtrot", got, sizeof got),
+           "page 2 row 2 want \"Foxtrot\" got \"%s\"", got);
+    EXPECT(r, assert_text_suffix(SUMMARY_Y_MIN, SUMMARY_Y_MAX, " p2/2", got, sizeof got),
+           "summary want a page marker \" p2/2\" got \"%s\"", got);
+
+    drag(BODY_CX, BODY_CY + 40, BODY_CX, BODY_CY - 40, 4);   /* wraps back to page 1 */
+    EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "> Alpha", got, sizeof got),
+           "wrapping the list gave row 1 \"%s\"", got);
+}
+
+/* The overlay covers the screen while it is on, and leaves nothing behind. */
+static void check_overlay(result_t *r)
+{
+    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
+           "no face before the overlay (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
+
+    /* Hold a finger down past LVGL's long-press time (LV_INDEV_DEF_LONG_PRESS_TIME,
+     * 400 ms at this 30 ms tick), then let go. */
+    g_poll_now_calls = 0;
+    post_press(BODY_CX, BODY_CY);
+    render(20);
+    post_release();
+    render(4);
+
+    /* The panel is a 94%-opaque wash of COL_BG, so the face must be gone even
+     * though the exact pixel is no longer the bare background colour. */
+    EXPECT(r, pixel_at(BODY_CX, BODY_CY) != expect_rgb(COL_WORKING),
+           "long press did not raise the overlay (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
+    EXPECT(r, pixel_at(BODY_CX, BODY_CY) < 0x202020u,
+           "the overlay is not dark (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
+
+    /* LVGL sends CLICKED on release "regardless to long press" (lv_event.h), and
+     * a click would refresh from the bridge. It must not: the press was a long
+     * press, and only a real tap is a tap. */
+    EXPECT(r, g_poll_now_calls == 0,
+           "a long press also read as a tap (%d bridge polls)", g_poll_now_calls);
+
+    post_press(BODY_CX, BODY_CY);   /* a second long press drops it again */
+    render(20);
+    post_release();
+    render(4);
+    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
+           "the overlay did not come down (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
 }
 
 /* The idle face must actually move. WORKING carries all four of the new idle
@@ -1117,6 +1312,10 @@ int main(void)
         { "sweat",    check_sweat    },
         { "motes",    check_motes    },
         { "party",    check_party    },
+        { "view_switch", check_view_switch },
+        { "paging",      check_paging, .landscape = false },
+        { "overlay",     check_overlay },
+        { "flourish",    check_flourish },
         { "land_blocked", check_land_blocked, true },
         { "land_working", check_land_working, true },
         { "land_empty",   check_land_empty,   true },

@@ -22,6 +22,7 @@ typedef enum {
 } herdr_agent_state_t;
 
 typedef struct {
+    char               id[24]; /* pane id, e.g. "w5:p1"; matches the bridge's /stats */
     char               label[HERDR_LABEL_LEN];
     char               kind[12];
     herdr_agent_state_t state;
@@ -58,6 +59,35 @@ static inline const char *herdr_state_name(herdr_agent_state_t s)
 #else
 #define UI_LOGI(tag, fmt, ...) ((void)0)
 #endif
+
+/* Session statistics for the stats view, served by the bridge's GET /stats and
+ * summed from the agent harness's own session logs. Zeroed until the first
+ * successful fetch, which the UI renders as "no data yet". `per[]` is aligned
+ * with herdr_status_t.agents[]. */
+#define HERDR_MODEL_LEN 16
+
+typedef struct {
+    uint32_t tokens_in;
+    uint32_t tokens_out;
+    uint32_t messages;
+    uint32_t tool_calls;
+    uint32_t age_s; /* seconds since this session's last activity */
+    char     model[HERDR_MODEL_LEN];
+} herdr_session_t;
+
+typedef struct {
+    bool     valid;     /* a fetch has succeeded */
+    uint32_t sessions;  /* how many the bridge described */
+    uint32_t tokens_in;
+    uint32_t tokens_out;
+    uint32_t messages;
+    uint32_t tool_calls;
+    uint32_t age_s;     /* since the newest activity across sessions */
+    herdr_session_t per[HERDR_MAX_AGENTS];
+} herdr_sessions_t;
+
+/* Filled by herdr_client.c from /stats; false before the first success. */
+bool herdr_stats_get(herdr_sessions_t *out);
 
 /* Implemented by herdr_client.c on the device, by a stub in the host harness.
  * `out` is left untouched and false is returned before herdr_client_start(). */

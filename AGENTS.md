@@ -339,6 +339,20 @@ and returning data. Absence of errors over minutes is decent evidence the bus an
 controller are alive. It does not prove the panel reports coordinates; only a
 physical press does.
 
+### One finger, not two
+
+The driver caches the second point (`touchpad_x[1]`/`y[1]`) but on this panel it
+is unreachable, and the way it fails is informative **[verified on this unit]**:
+a 14-byte read of the touch block (`0x01` = count + 2 x 6 bytes, i.e. both
+fingers) is answered with a **data-phase NACK** — `I2C transaction unexpected
+nack detected` — on most attempts, while an 8-byte read (count + one finger)
+succeeds. A NACK *during* the data phase means the address phase ACKed and the
+controller then refused partway, which is what a register window that ends after
+finger 1 looks like. Nothing in the vendor docs, the demo or the product page
+describes this panel as multi-touch. Treat it as single-touch: one finger, and
+LVGL's own click / long-press / gesture events are the whole input vocabulary
+(§11).
+
 `bsp_touch_init` sets `x_max = min(xmax, ymax)` and `y_max = max(xmax, ymax)`
 regardless of rotation. That is correct for portrait, and pairs with
 `swap_xy=1` in landscape — but it is a hard-coded assumption that looks wrong for
@@ -464,7 +478,7 @@ Two halves, no USB link needed after flashing:
 
 |Path|What it is|
 |---|---|
-|`bridge/herdr_status_bridge.py`|PC side, Python 3 **stdlib only**. Reads herdr over its Unix socket, serves `GET /state` on `0.0.0.0:8787`.|
+|`bridge/herdr_status_bridge.py`|PC side, Python 3 **stdlib only**. Reads herdr over its Unix socket and the agent harness's session logs, serves `GET /state` and `GET /stats` on `0.0.0.0:8787`.|
 |`main/`|Device firmware: WiFi station + HTTP poller + the LVGL blob companion.|
 |`tools/ui_host_test/`|Host render harness for the UI (§9a). `make ui-test`.|
 
@@ -479,8 +493,28 @@ Two halves, no USB link needed after flashing:
 - `/state` body: `{"v":1,"gen":<int>,"stale":<bool>,"agents":[{id,kind,label,status,focus}]}`,
   `gen` bumping on every successful poll, `stale` true >5 s after the last one.
   Labels are ASCII-sanitised here because the device's fonts are ASCII-only.
+- `/stats` body: `{"v":1,"gen":<int>,"stale":<bool>,"sessions":<int>,
+  "totals":{in,out,calls,messages,age_s},"agents":[{id,in,out,calls,messages,age_s,model}]}`.
+  Rows are keyed **and ordered** like the `/state` agents, so the device can match them
+  by id or by index; an agent herdr reports without a session path has no row.
+  The numbers come from the agent harness's own session logs
+  (`~/.omp/agent/sessions/<slug>/<ts>_<uuid>.jsonl`), located through the herdr
+  snapshot's `agent_session` (`kind == "path"`) — herdr has no usage data of its own,
+  and `~/.omp/stats.db` is only as fresh as the last `omp stats` run.
+  `calls` counts tool executions, `messages` counts assistant turns, `in` is prompt
+  tokens (including cache reads/writes, so `in + out == omp's own totalTokens`),
+  `age_s` is seconds since that log was last written and `totals.age_s` is the
+  youngest, `model` is the last model the session used (provider prefix stripped,
+  15 chars for the device's 16-byte buffer). `--once --stats` prints one body.
+- Only the record type, the tool-execution marker and
+  `message.{model,usage.{input,output,cacheRead,cacheWrite}}` are read out of a session
+  log: the records also hold the whole conversation and none of it is stored, logged or
+  served. The logs are read **incrementally** (per-file offset plus the partial trailing
+  line), never re-parsed, so a `/stats` request is served from a snapshot a background
+  thread refreshes once a second (~0.6 ms to serve, ~0.03 ms per refresh pass warm).
 - `--fixture bridge/fixtures/<mood>.json` serves a fixed agent list instead of
-  polling — this is how each companion mood is driven on real hardware.
+  polling — this is how each companion mood is driven on real hardware; a fixture only
+  carries the `/state` fields, so `/stats` reports zero sessions in that mode.
 - `bridge/herdr-status-bridge.service` is a **user** unit
   (`systemctl --user`); `make bridge-service-install` installs and enables it.
 
@@ -570,6 +604,47 @@ Two halves, no USB link needed after flashing:
   172x320, landscape puts the face on the left and the list on the right at
   320x172. `make ui-test` covers both (`land_*` scenarios drive the same
   resolution switch the device uses).
+
+### Touch input, views and the stats source
+
+- **LVGL owns the input path.** The panel is single-touch (§7), so the port's own
+  pointer indev is enough: `ui_companion.c`'s `screen_event_cb` maps
+  `LV_EVENT_CLICKED` to a refresh + flourish, `LV_EVENT_LONG_PRESSED` to the
+  diagnostics overlay, and `LV_EVENT_GESTURE` +
+  `lv_indev_get_gesture_dir(lv_indev_get_act())` to view switching (left/right)
+  and paging (up/down). There is no input task, no gesture recogniser of our own
+  and no `lvgl_port_remove_touch` — that whole path existed only to read a second
+  point the controller will not hand over.
+- Two LVGL behaviours the wiring has to absorb, both asserted by `make ui-test`:
+  **CLICKED is sent on release "regardless to long press"** (`lv_event.h`), and
+  **CLICKED is also sent after a gesture** (measured: a swipe's release ran the
+  tap path, which showed up as an unexpected flourish in the stats view). A long
+  press and a gesture each set a flag that suppresses the click, and the harness
+  asserts both by counting bridge polls — `0` after a long press and after a
+  swipe, `1` after a real tap.
+- The screen carries `LV_OBJ_FLAG_CLICKABLE`; the view containers above it stay
+  `make_passive`d, so the press and the gesture are delivered to the screen.
+- The two views are two `lv_obj` containers, both children of the single screen,
+  each at the origin so children keep the coordinates they were written with;
+  switching is one hidden flag. Do not turn them into separate LVGL screens:
+  main.c's rotation path auto-deletes the old screen, so a second screen's stored
+  pointer would dangle.
+- The diagnostics overlay is created on demand and deleted on the next long
+  press; `ui_companion_create()` clears those pointers because they die with the
+  screen.
+- **Stats come from the agents' own session logs**, not from herdr: herdr exposes
+  only the session *path* (`agent_session.kind == "path"`), while the omp jsonl
+  carries `message.message.usage.{input,output,...}` and `usage.cost.total` in
+  USD. The bridge reads *only* those numeric fields — the same files are full of
+  conversation content, none of which may leave the PC — and parses them
+  incrementally (remember (path, size), read only the appended bytes: ~0.1–1.7 ms
+  against 116 ms for a re-parse of the largest session). There is no second
+  harness on this machine; `π` is omp's own title glyph. `~/.omp/stats.db` is
+  pre-aggregated but only as fresh as the last `omp stats` run, so it is not used.
+- `main/ui_companion.c`, `main/touch_gesture.c` and `main/ui_stats.h` stay free of
+  esp_* includes; the diagnostics getters declared in `ui_stats.h` are esp-side
+  (`herdr_client.c`, `ui_rotation.c`, `ui_input.c`, `ui_device.c`) and the host
+  harness stubs them, exactly as it stubs `herdr_client_get()`.
 
 ### What "working" looks like in the log
 
