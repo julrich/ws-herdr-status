@@ -1,0 +1,11 @@
+[Unit]
+Description=herdr status bridge (HTTP /state for the ws-herdr-status device)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/Projects/tsnm/code/ws-herdr-status/bridge/herdr_status_bridge.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

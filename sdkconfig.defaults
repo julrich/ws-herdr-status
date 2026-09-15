@@ -1,0 +1,38 @@
+CONFIG_IDF_TARGET="esp32c6"
+
+# The USB-C connector is the only console exposed on this board: GPIO12/13 are
+# wired to the native USB-Serial-JTAG peripheral, GPIO16/17 (UART0) are only on
+# the 22-pin header. Route the console there so one cable does flash + monitor.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# 8 MB flash: the partition table gives the app 6 MB.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+
+# --- LVGL ---------------------------------------------------------------
+# The panel is driven in big-endian RGB565 by the JD9853 SPI driver.
+CONFIG_LV_COLOR_16_SWAP=y
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_MEM_SIZE_KILOBYTES=48
+
+CONFIG_LV_FONT_MONTSERRAT_12=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+
+CONFIG_LV_USE_ASSERT_NULL=y
+CONFIG_LV_USE_ASSERT_MALLOC=y
+
+# --- network ------------------------------------------------------------
+# WiFi + the HTTP poller share the heap with LVGL; trim the LVGL side (done
+# above: CONFIG_LV_MEM_SIZE_KILOBYTES=48, from the template's 64).
+# CONFIG_ESP_WIFI_ENABLED is a derived symbol (default y on SOC_WIFI_SUPPORTED,
+# no prompt) — it cannot be assigned here; it lands in the generated sdkconfig
+# automatically.
+
+# Fewer transactions on the I2C bus shared with the IMU (see AGENTS.md §7).
+CONFIG_LV_INDEV_DEF_READ_PERIOD=50

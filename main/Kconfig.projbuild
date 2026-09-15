@@ -1,0 +1,46 @@
+menu "Herdr status companion"
+
+    config HERDR_WIFI_SSID
+        string "WiFi SSID"
+        default ""
+
+    config HERDR_WIFI_PASSWORD
+        string "WiFi password"
+        default ""
+
+    config HERDR_BRIDGE_HOST
+        string "Bridge host or IP"
+        default "192.168.2.203"
+
+    config HERDR_BRIDGE_PORT
+        int "Bridge HTTP port"
+        default 8787
+
+    config HERDR_POLL_PERIOD_MS
+        int "Poll period (ms)"
+        default 1000
+
+    config HERDR_UI_MAX_AGENTS
+        int "Agent rows shown"
+        range 1 6
+        default 4
+
+    config HERDR_IMU_ROTATE
+        bool "Follow the IMU when the device is turned"
+        default y
+        help
+            The QMI8658A gyroscope detects a 90 degree turn of the device
+            (about the screen's normal axis, i.e. a spin on the desk) and the
+            UI follows into landscape or back into portrait. The normal axis is
+            calibrated from the accelerometer at boot, so no per-board axis
+            constants are needed. Turn this off to pin the panel to portrait.
+
+    config HERDR_IMU_LOG_RAW
+        bool "Log raw IMU samples once a second"
+        default n
+        help
+            Prints acceleration (g) and turn rate (deg/s) once a second while the
+            IMU is running. Useful when checking the axis calibration on a new
+            board.
+
+endmenu

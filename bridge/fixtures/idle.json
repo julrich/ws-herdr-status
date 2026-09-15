@@ -1,0 +1,5 @@
+{
+  "agents": [
+    {"id": "w1:p1", "kind": "omp", "label": "Waiting", "status": "idle", "focus": false}
+  ]
+}

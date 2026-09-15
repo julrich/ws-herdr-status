@@ -1,0 +1,6 @@
+{
+  "agents": [
+    {"id": "w1:p1", "kind": "omp", "label": "Blocked build", "status": "working", "focus": true},
+    {"id": "w1:p2", "kind": "claude", "label": "Docs pass", "status": "idle", "focus": false}
+  ]
+}
