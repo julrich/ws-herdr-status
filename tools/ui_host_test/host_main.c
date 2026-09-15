@@ -73,6 +73,7 @@ static int g_h = 320;
 
 #define HEADLINE_Y_MIN 0
 #define HEADLINE_Y_MAX 30
+#define SCR_H_HALF  160  /* portrait half of the 320 px long side            */
 #define STATS_Y0    30   /* portrait stats line 0: headline_y 10 + 20        */
 #define STATS_ROW_H 14   /* ui_companion.c's per-line step                  */
 
@@ -187,22 +188,30 @@ static void post_release(void)
 
 static void render(int iterations);
 
-/* Drag the scripted pointer, one tick per step. LVGL decides a gesture from the
- * travel distance and the velocity across reads (LV_INDEV_DEF_GESTURE_LIMIT,
- * LV_INDEV_DEF_GESTURE_MIN_VELOCITY), so a single jump would not register. */
-static void drag(int x0, int y0, int x1, int y1, int steps)
+/* A click at (x, y) through the scripted pointer: press, one tick, release, one
+ * tick. A tick is 30 ms of the virtual clock. */
+static void click_at(int x, int y)
 {
-    post_press(x0, y0);
+    post_press(x, y);
     render(1);                       /* LVGL latches the press */
-
-    for (int i = 1; i <= steps; i++) {
-        post_press(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps);
-        render(1);
-    }
-
     post_release();
-    render(2);
+    render(1);
 }
+
+/* Two clicks in the same half, 30 ms apart — inside the UI's 350 ms window. */
+static void double_click_at(int x, int y)
+{
+    click_at(x, y);
+    click_at(x, y);
+}
+
+/* The two halves: the face keeps the first half along the long axis, the list the
+ * second. Portrait splits at y=160, landscape at x=160 (ui_companion.c's
+ * screen_event_cb). */
+#define FACE_HALF_X  BODY_CX
+#define FACE_HALF_Y  BODY_CY                 /* 108: above the split */
+#define LIST_HALF_X  BODY_CX
+#define LIST_HALF_Y  (SCR_H_HALF + 20)       /* 180: below it */
 
 static void indev_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
 {
@@ -927,24 +936,31 @@ static void check_view_switch(result_t *r)
            "mood view headline want \"WORKING\" got \"%s\"", got);
 
     g_poll_now_calls = 0;
-    drag(BODY_CX + 60, BODY_CY, BODY_CX - 60, BODY_CY, 4);   /* swipe left */
+    double_click_at(FACE_HALF_X, FACE_HALF_Y);   /* double tap the face's half */
+    /* The tap that opened the double also played the mood's flourish, which paints
+     * over the screen for a while: let it finish before judging the new view. */
+    render(30);
 
-    EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "swipe left gave view %s", ui_view_name(ui_companion_view()));
-    /* A swipe is not a tap, so it must not refresh from the bridge either. */
-    EXPECT(r, g_poll_now_calls == 0,
-           "a swipe also read as a tap (%d bridge polls)", g_poll_now_calls);
+    EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "double tap gave view %s",
+           ui_view_name(ui_companion_view()));
+    /* A double tap contains a tap, so exactly one refresh is expected: the first
+     * click of the pair. Nothing waits to find out whether a double is coming. */
+    EXPECT(r, g_poll_now_calls == 1,
+           "a double tap on the face wanted 1 bridge poll, got %d", g_poll_now_calls);
     EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_BG),
            "the face is still drawn in the stats view (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
     EXPECT(r, assert_text(0, 30, "STATS", got, sizeof got),
            "stats view title want \"STATS\" got \"%s\"", got);
 
-    drag(BODY_CX + 60, BODY_CY, BODY_CX - 60, BODY_CY, 4);   /* two views: wraps back */
+    double_click_at(FACE_HALF_X, FACE_HALF_Y);   /* two views: the next double wraps back */
+    render(30);                                  /*  as above: settle the flourish */
     EXPECT(r, ui_companion_view() == UI_VIEW_MOOD, "wrapping gave view %s", ui_view_name(ui_companion_view()));
     EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
            "the face did not come back (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
 
-    drag(BODY_CX - 60, BODY_CY, BODY_CX + 60, BODY_CY, 4);   /* swipe right */
-    EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "swipe right from mood gave view %s",
+    double_click_at(FACE_HALF_X, FACE_HALF_Y);
+    render(30);
+    EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "double tap from mood gave view %s",
            ui_view_name(ui_companion_view()));
 }
 
@@ -956,8 +972,8 @@ static void check_stats(result_t *r)
 {
     char got[64];
 
-    drag(BODY_CX + 60, BODY_CY, BODY_CX - 60, BODY_CY, 4);   /* swipe into stats */
-    EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "swipe gave view %s",
+    double_click_at(FACE_HALF_X, FACE_HALF_Y);   /* double tap into the stats view */
+    EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "double tap gave view %s",
            ui_view_name(ui_companion_view()));
 
     /* Page one is link and device: the same numbers the long-press overlay shows. */
@@ -966,8 +982,10 @@ static void check_stats(result_t *r)
     EXPECT(r, assert_text(STATS_Y0, STATS_Y0 + 6, "LINK", got, sizeof got),
            "page 1 line 0 want \"LINK\" got \"%s\"", got);
 
-    /* Page two is the sessions, a vertical swipe away. */
-    drag(BODY_CX, BODY_CY + 40, BODY_CX, BODY_CY - 40, 4);   /* swipe up: page 2 */
+    /* Page two is the sessions, one tap on the list's half away — deferred by the
+     * double window like every list tap. */
+    click_at(LIST_HALF_X, LIST_HALF_Y);
+    render(20);
 
     EXPECT(r, assert_text(STATS_Y0, STATS_Y0 + 6, "SESS 4   1.0G in", got, sizeof got),
            "session totals want \"SESS 4   1.0G in\" got \"%s\"", got);
@@ -1001,7 +1019,8 @@ static void check_paging(result_t *r)
     EXPECT(r, assert_text(LIST_Y0 + 3 * LIST_ROW_H + 2, LIST_Y0 + 3 * LIST_ROW_H + 15, "Delta", got, sizeof got),
            "page 1 row 4 want \"Delta\" got \"%s\"", got);
 
-    drag(BODY_CX, BODY_CY + 40, BODY_CX, BODY_CY - 40, 4);   /* swipe up */
+    click_at(LIST_HALF_X, LIST_HALF_Y);   /* tap the list's half: forward a page */
+    render(20);   /* the page waits out the double window (~350 ms) before it moves */
 
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "Echo", got, sizeof got),
            "page 2 row 1 want \"Echo\" got \"%s\"", got);
@@ -1010,9 +1029,34 @@ static void check_paging(result_t *r)
     EXPECT(r, assert_text_suffix(SUMMARY_Y_MIN, SUMMARY_Y_MAX, " p2/2", got, sizeof got),
            "summary want a page marker \" p2/2\" got \"%s\"", got);
 
-    drag(BODY_CX, BODY_CY + 40, BODY_CX, BODY_CY - 40, 4);   /* wraps back to page 1 */
+    click_at(LIST_HALF_X, LIST_HALF_Y);   /* wraps back to page 1 */
+    render(20);
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "> Alpha", got, sizeof got),
            "wrapping the list gave row 1 \"%s\"", got);
+
+    /* The list's double tap is the overlay's other door, and the list must not move:
+     * the tap that opened the double only scheduled a page, and the double cancels
+     * it. Rendered well past the double window, so a page that was only deferred
+     * would have landed by now. */
+    double_click_at(LIST_HALF_X, LIST_HALF_Y);
+    render(20);
+    EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "> Alpha", got, sizeof got),
+           "the list's double moved the page: want \"> Alpha\" got \"%s\"", got);
+    EXPECT(r, pixel_at(BODY_CX, BODY_CY) < 0x202020u,
+           "the list's double did not raise the overlay (#%06X)",
+           (unsigned)pixel_at(BODY_CX, BODY_CY));
+
+    double_click_at(LIST_HALF_X, LIST_HALF_Y);   /* again: it goes back down */
+    render(20);
+    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
+           "the list's second double did not drop the overlay (#%06X)",
+           (unsigned)pixel_at(BODY_CX, BODY_CY));
+
+    /* And the single does page, once the window has passed. */
+    click_at(LIST_HALF_X, LIST_HALF_Y);
+    render(20);
+    EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "Echo", got, sizeof got),
+           "a single tap on the list's half did not page: want \"Echo\" got \"%s\"", got);
 }
 
 /* The overlay covers the screen while it is on, and leaves nothing behind. */

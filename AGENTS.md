@@ -607,23 +607,45 @@ Two halves, no USB link needed after flashing:
 
 ### Touch input, views and the stats source
 
-- **LVGL owns the input path.** The panel is single-touch (§7), so the port's own
-  pointer indev is enough: `ui_companion.c`'s `screen_event_cb` maps
-  `LV_EVENT_CLICKED` to a refresh + flourish, `LV_EVENT_LONG_PRESSED` to the
-  diagnostics overlay, and `LV_EVENT_GESTURE` +
-  `lv_indev_get_gesture_dir(lv_indev_get_act())` to view switching (left/right)
-  and paging (up/down). There is no input task, no gesture recogniser of our own
-  and no `lvgl_port_remove_touch` — that whole path existed only to read a second
-  point the controller will not hand over.
-- Two LVGL behaviours the wiring has to absorb, both asserted by `make ui-test`:
-  **CLICKED is sent on release "regardless to long press"** (`lv_event.h`), and
-  **CLICKED is also sent after a gesture** (measured: a swipe's release ran the
-  tap path, which showed up as an unexpected flourish in the stats view). A long
-  press and a gesture each set a flag that suppresses the click, and the harness
-  asserts both by counting bridge polls — `0` after a long press and after a
-  swipe, `1` after a real tap.
+- **LVGL owns the input path, and the vocabulary is positional.** The panel is
+  single-touch (§7), so the port's own pointer indev is enough; `ui_companion.c`'s
+  `screen_event_cb` reads `LV_EVENT_CLICKED` and `LV_EVENT_LONG_PRESSED` and
+  nothing else. There is no input task, no gesture recogniser of our own, and no
+  `lvgl_port_remove_touch` — that whole path existed only to read a second point
+  the controller will not hand over.
+- **Swipes were tried and removed.** They did the view switch and the paging and
+  they were the least reliable input on this panel: a drag that LVGL reads as a
+  gesture *also suppresses the click*, so a swipe that fell short did nothing at
+  all, and one that ran on into the wrong object did the wrong thing. The screen
+  is small enough to reach every corner, so input is a tap or a double tap in one
+  of two halves:
+
+  | input | action |
+  |---|---|
+  | tap, the face's half | refresh from the bridge + the mood's flourish |
+  | tap, the list's half | forward a page (agent list, or the stats page) |
+  | double tap, the face's half | the other view (mood ↔ stats) |
+  | double tap, the list's half | the diagnostics overlay |
+  | hold, anywhere | the overlay too |
+
+- The halves are **equal halves of the long side**, and the artwork keeps its roles
+  in both orientations (`ui_layout_init`): portrait puts the face in the top half
+  and the list below it, landscape puts the face on the left and the list beside
+  it. So "the face's half" is always the first half along the split axis.
+- Two asymmetries are deliberate. The **face's tap is immediate** — it is the one
+  that wants feedback, and its double (the view switch) is orthogonal, so both may
+  happen on a double. The **list's tap is deferred by `DOUBLE_MS` (350 ms)** and
+  cancelled if a second tap lands: paging is not orthogonal to the overlay, so
+  paging first and undoing it flickers through a page nobody asked for. Anything
+  delaying the *face* by 350 ms would read as a laggy poke, which is why it is not
+  uniform.
+- LVGL sends **CLICKED on release "regardless to long press"** (`lv_event.h`), so a
+  long press remembers itself and suppresses the click; the harness asserts that by
+  counting bridge polls (`0` after a long press, `1` after a tap or a double tap).
 - The screen carries `LV_OBJ_FLAG_CLICKABLE`; the view containers above it stay
-  `make_passive`d, so the press and the gesture are delivered to the screen.
+  `make_passive`d, so the press is delivered to the screen. The deferred page lives
+  in a one-shot `lv_timer`, which `ui_companion_create` deletes along with the
+  screen it would otherwise fire onto.
 - The two views are two `lv_obj` containers, both children of the single screen,
   each at the origin so children keep the coordinates they were written with;
   switching is one hidden flag. Do not turn them into separate LVGL screens:
