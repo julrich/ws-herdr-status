@@ -35,6 +35,20 @@ static const char *TAG = "esp_lcd_touch_axs5106";
  * assertion rather than for as long as the line stays asserted. */
 static int8_t s_int_level = -1;
 
+/* Set by the INT ISR when the controller announces a report. This is the primary
+ * trigger for a read; see the gate in read_data(). */
+static volatile bool s_report_ready;
+
+/* The interrupt handler, IRAM-resident like the vendor's own: it runs on the
+ * falling edge of INT (bsp_touch.c leaves levels.interrupt at 0, and the driver
+ * configures GPIO_INTR_NEGEDGE), and all it does is record that a report is
+ * waiting. The read happens in read_data(), under the caller's lock. */
+static void IRAM_ATTR axs5106_isr(esp_lcd_touch_handle_t tp)
+{
+    (void)tp;
+    s_report_ready = true;
+}
+
 /* Whether the last report that got through said a finger was down. This has to be
  * the driver's own flag: esp_lcd_touch_get_coordinates() consumes the sample (it
  * zeroes tp->data.points), so the handle cannot answer this question. It is also
@@ -102,11 +116,21 @@ esp_err_t esp_lcd_touch_new_i2c_axs5106(i2c_master_dev_handle_t dev_handle, cons
         ret = gpio_config(&int_gpio_config);
         ESP_GOTO_ON_ERROR(ret, err, TAG, "GPIO config failed");
 
-        /* Register interrupt callback */
-        if (esp_lcd_touch_axs5106->config.interrupt_callback)
-        {
-            esp_lcd_touch_register_interrupt_callback(esp_lcd_touch_axs5106, esp_lcd_touch_axs5106->config.interrupt_callback);
-        }
+        /* Register our own handler: esp_lcd_touch installs the ISR service,
+         * enables the pin and routes the edge here.
+         *
+         * This is load-bearing. The controller announces a report with a *short
+         * pulse* on this line, so a driver that only samples the level sees the
+         * pulses its 50 ms poll happens to land on and misses the rest — measured
+         * on this unit as one touch in eight reaching the driver, with the panel
+         * otherwise looking dead while every log line it did produce was correct.
+         * The vendor's Arduino driver for this panel uses an ISR for exactly this
+         * reason ("an ISR on the falling edge sets a flag, and the read consumes
+         * the flag"). */
+        ret = esp_lcd_touch_register_interrupt_callback(esp_lcd_touch_axs5106, axs5106_isr);
+        ESP_GOTO_ON_ERROR(ret, err, TAG, "report interrupt registration failed");
+        ESP_LOGI(TAG, "report interrupt registered on GPIO %d",
+                 (int)esp_lcd_touch_axs5106->config.int_gpio_num);
     }
 
     /* Prepare pin for touch controller reset */
@@ -211,12 +235,19 @@ static esp_err_t esp_lcd_touch_axs5106_read_data(esp_lcd_touch_handle_t tp)
      * report still says a finger is down. If that second read finds nothing
      * pending, the finger has stopped reporting, which is the release. */
     if (tp->config.int_gpio_num != GPIO_NUM_NC) {
+        const bool announced = s_report_ready;   /* set by the ISR, consumed here */
+
+        s_report_ready = false;
+
+        /* The level is checked as well, as a fallback for a missed edge and for
+         * the case where the line is being held rather than pulsed. */
         const int  level  = gpio_get_level(tp->config.int_gpio_num);
         const int  active = tp->config.levels.interrupt ? 1 : 0;
         const bool fresh  = (level == active) && (s_int_level != active);
 
         s_int_level = (int8_t)level;
-        if (!fresh && !s_finger_down) {
+
+        if (!announced && !fresh && !s_finger_down) {
             return ESP_OK; /* nothing announced, nothing outstanding */
         }
     }
@@ -237,6 +268,17 @@ static esp_err_t esp_lcd_touch_axs5106_read_data(esp_lcd_touch_handle_t tp)
             tp->data.points = 0;
             portEXIT_CRITICAL(&tp->data.lock);
             ESP_LOGI(TAG, "finger up (no report pending)");
+        } else {
+            /* Silent failures are why a missed touch used to be indistinguishable
+             * from a touch that never happened. Rate-limited: a busy controller
+             * can refuse a read now and then without flooding the console. */
+            static uint32_t s_last_log_tick;
+            const uint32_t  now = xTaskGetTickCount();
+
+            if (s_last_log_tick == 0 || (now - s_last_log_tick) > (5000 / portTICK_PERIOD_MS)) {
+                s_last_log_tick = now;
+                ESP_LOGW(TAG, "announced a report but did not hand it over");
+            }
         }
         return ESP_OK;
     }

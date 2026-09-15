@@ -357,12 +357,35 @@ driver, while `esp_lcd_touch_get_coordinates()` *consumes* the sample by zeroing
 click, no long press, no swipe** — with a healthy driver, a clean boot log and a
 clean health signal. That is exactly how this presented: a dead-looking panel.
 
-What works: read when the controller announces a report, **and** while the last
-report still says a finger is down. If that second read finds nothing pending, the
-finger has stopped reporting, which *is* the release — so the driver clears the
-sample and logs `finger up (no report pending)`. It also logs the down transition,
-`finger down (x,y)`, with the raw coordinates, which is how the panel's mapping is
-checked without eyes on the screen. Idle panels still cost nothing on the bus.
+**And the announcement is a *pulse*.** Even a gate that reads on the asserting edge
+only sees the pulses its poll happens to land on: polling the level from the port's
+50 ms indev timer, **one touch in eight** reached the driver — and the one that did
+worked perfectly end to end (`finger down (73,144)` → `ui: click face` → the
+refresh), which is what made a missing report look like a gesture-recognition bug.
+The edge was configured all along (`GPIO_INTR_NEGEDGE`, active-low), but nothing had
+registered a handler, so the interrupt fired into nothing.
+
+The driver now registers `axs5106_isr()` through
+`esp_lcd_touch_register_interrupt_callback()` — the library installs the ISR
+service, enables the pin and routes the edge — and `read_data()` reads when *any* of
+three things says so:
+
+| trigger | covers |
+|---|---|
+| the ISR flag | the normal case: every announced report, pulsed or held |
+| the INT level, on a fresh assertion | a missed edge, and a line held rather than pulsed |
+| the last report said a finger is down | the release, when it is not announced as a report |
+
+If that last read finds nothing pending, the finger has stopped reporting, which *is*
+the release — so the driver clears the sample and logs `finger up (no report
+pending)`. It also logs the down transition, `finger down (x,y)`, with the raw
+coordinates, which is how the panel's mapping is checked without eyes on the screen.
+Init logs `report interrupt registered on GPIO N`, so the running image says which
+mechanism it has, and a read that was announced but got no data warns
+(`announced a report but did not hand it over`, at most once per 5 s) — that silence
+is what made a missed touch indistinguishable from a touch that never happened.
+
+Idle panels still cost nothing on the bus.
 
 ### The read shape, measured
 
