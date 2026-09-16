@@ -265,8 +265,6 @@ static ui_view_t s_view;
 static int       s_page;          /* which slice of the agent list is shown */
 static lv_obj_t *s_mood_cont;     /* holds the whole companion view */
 static lv_obj_t *s_stats_cont;    /* holds the stats view */
-static lv_obj_t *s_overlay;       /* diagnostics panel, created on demand */
-static lv_obj_t *s_overlay_text;
 static lv_obj_t *s_stats_title;
 /* The stats view is a two-column table: a label on the left, a figure on the right,
  * a hairline under each section header, and a status dot in front of every session
@@ -284,10 +282,9 @@ static lv_obj_t *s_stats_val[STATS_LINES];   /* right column, right-aligned */
 static lv_obj_t *s_stats_rule[2];            /* hairline under a section header */
 static lv_obj_t *s_stats_dot[STATS_ROWS];    /* one per session row */
 
-static uint32_t  s_taps;      /* interaction counters, shown by the overlay */
+static uint32_t  s_taps;      /* interaction counters, shown on the stats device page */
 static uint32_t  s_longs;
 static uint32_t  s_doubles;
-static uint8_t   s_page_due;  /* beats left before the list's page lands, 0 = none */
 
 /* --- the mood panel ------------------------------------------------------- */
 
@@ -709,7 +706,6 @@ static void ui_start_burst(void)
 /* ---- views ------------------------------------------------------------- */
 
 static void ui_stats_render(void);
-static void ui_overlay_render(void);
 static void ui_render_list(const herdr_status_t *s);
 static void ui_render_summary(const herdr_status_t *s);
 
@@ -794,86 +790,6 @@ void ui_companion_on_page(int dir)
     ui_render_list(&s);
     ui_render_summary(&s);
     UI_LOGI(TAG, "list page %d/%d", s_page + 1, pages);
-}
-
-/* ---- diagnostics overlay ------------------------------------------------- */
-
-void ui_companion_on_toggle_overlay(void)
-{
-    if (s_overlay != NULL) {
-        lv_obj_delete(s_overlay); /* takes the label with it */
-        s_overlay      = NULL;
-        s_overlay_text = NULL;
-        UI_LOGI(TAG, "overlay off");
-        return;
-    }
-
-    s_overlay = lv_obj_create(s_scr);
-    make_passive(s_overlay);
-    lv_obj_set_size(s_overlay, SCR_W, SCR_H);
-    lv_obj_set_pos(s_overlay, 0, 0);
-    lv_obj_set_style_radius(s_overlay, 0, 0);
-    lv_obj_set_style_bg_color(s_overlay, lv_color_hex(COL_BG), 0);
-    lv_obj_set_style_bg_opa(s_overlay, 240, 0);
-    lv_obj_set_style_border_width(s_overlay, 1, 0);
-    lv_obj_set_style_border_color(s_overlay, lv_color_hex(COL_TRACK), 0);
-    lv_obj_set_style_border_opa(s_overlay, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_all(s_overlay, 5, 0);
-
-    s_overlay_text = lv_label_create(s_overlay);
-    make_passive(s_overlay_text);
-    lv_obj_set_style_text_font(s_overlay_text, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(s_overlay_text, lv_color_hex(COL_TEXT), 0);
-    lv_obj_set_pos(s_overlay_text, 0, 0);
-    lv_label_set_long_mode(s_overlay_text, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(s_overlay_text, SCR_W - 12);
-
-    ui_overlay_render();
-    UI_LOGI(TAG, "overlay on");
-}
-
-/* Everything an overlay line can say that the firmware can answer about itself.
- * The whole point is that this is readable when something is wrong, so it is
- * deliberately dense and uses short labels. */
-static void ui_overlay_render(void)
-{
-    if (s_overlay_text == NULL) {
-        return;
-    }
-
-    herdr_link_stats_t link = { 0 };
-    herdr_status_t     s    = { 0 };
-
-    herdr_client_stats(&link);
-    const bool have = herdr_client_get(&s);
-
-    lv_mem_monitor_t mon;
-    lv_mem_monitor(&mon);
-
-    const uint32_t up = lv_tick_get() / 1000;
-    char           buf[512];
-
-    snprintf(buf, sizeof buf,
-             "up      %02u:%02u:%02u\n"
-             "heap    %u K low %u K\n"
-             "lvgl    %u%% frag %u%%\n"
-             "bridge  gen %u  %s\n"
-             "poll    %u ok %u err\n"
-             "rtt     %u ms  fail %u\n"
-             "agents  %d  ovf %d\n"
-             "input   tap %u  long %u\n"
-             "        dbl %u  view %s",
-             (unsigned)(up / 3600), (unsigned)((up / 60) % 60), (unsigned)(up % 60),
-             (unsigned)(ui_device_free_heap() / 1024), (unsigned)(ui_device_min_free_heap() / 1024),
-             (unsigned)mon.used_pct, (unsigned)mon.frag_pct,
-             (unsigned)link.gen, link.online ? "online" : "offline",
-             (unsigned)link.polls, (unsigned)link.fail_total,
-             (unsigned)link.rtt_ms, (unsigned)link.failures,
-             have ? s.count : 0, have ? s.overflow : 0,
-             (unsigned)s_taps, (unsigned)s_longs,
-             (unsigned)s_doubles, ui_view_name(s_view));
-
-    lv_label_set_text(s_overlay_text, buf);
 }
 
 /* ---- stats view ---------------------------------------------------------- */
@@ -1058,7 +974,7 @@ static void ui_stats_render(void)
 
     /* Page one is the sessions: the figures worth opening the view for are the
      * tokens and the money, and the link's own health is the second thing anyone
-     * wants (it is also the page the long-press overlay summarises). */
+     * wants. */
     if (s_stats_page == 1) {
         /* Link, device, and the things that go wrong. Each line is a label and a
          * figure, because one long line is what made this view hard to read. */
@@ -1509,11 +1425,6 @@ static void ui_tick(lv_timer_t *timer)
     const bool fresh = (s.gen != s_last_gen) || online_changed || s_sessions_moved;
     s_last_gen = s.gen;
     s_last_online = s.online;
-    /* A list tap's page lands here, a few beats after the tap (see PAGE_DELAY_TICKS). */
-    if (s_page_due != 0 && --s_page_due == 0) {
-        ui_companion_on_page(1);
-    }
-
     /* A mood-change reaction is over: back to the mood's resting face. */
     if (s_face_reaction != 0 && --s_face_reaction == 0) {
         mood_face_set(s_moods[s_mood].face, true);
@@ -1532,9 +1443,6 @@ static void ui_tick(lv_timer_t *timer)
     if (s_view == UI_VIEW_STATS) {
         ui_stats_render();
     }
-    if (s_overlay != NULL) {
-        ui_overlay_render();
-    }
 
     if (mood_changed || online_changed) {
         UI_LOGI(TAG, "mood=%s online=%d agents=%d overflow=%d",
@@ -1545,16 +1453,6 @@ static void ui_tick(lv_timer_t *timer)
 
 /* ---- tap ---------------------------------------------------------------- */
 
-/* One press, three meanings — the whole input vocabulary of this panel, taken
- * straight from LVGL's pointer events rather than from a reader of our own:
- *
- *   click        refresh from the bridge and play the mood's flourish
- *   long press   raise or drop the diagnostics overlay
- *   swipe        left/right switches view, up/down pages
- *
- * LVGL fires CLICKED on release "regardless to long press" (lv_event.h), so both
- * a long press and a swipe are remembered here and keep their release from also
- * reading as a tap. */
 /* Two halves, four gestures, and no swipes.
  *
  * Swipes did the view switch and the paging, and they were the least reliable
@@ -1563,39 +1461,25 @@ static void ui_tick(lv_timer_t *timer)
  * into the wrong object did something else. The screen is small enough to reach
  * every corner, so the vocabulary is positional.
  *
- * The long side of the screen is split into two equal halves, and the artwork
- * keeps the same roles in both orientations — portrait puts the face in the top
- * half with the agent list under it, landscape puts the face in the left half
- * with the list beside it (see ui_layout_init) — so "the face's half" is always
- * the first half along the split axis.
+ * The long side of the screen is split into two equal halves, and portrait puts the
+ * face in the top half with the agent list under it (ui_layout_init records that), so
+ * "the face's half" is the top one.
  *
  *   tap    the face's half    refresh from the bridge, play the flourish
  *   tap    the list's half    forward a page (the agent list, or the stats page)
  *   double the face's half    the other view
- *   double the list's half    the diagnostics overlay
- *   hold   anywhere           the overlay too, and nothing else
+ *   hold   anywhere           the other view too, and nothing else
+ *
+ * The hold is the way that has to work: a double tap needs two taps inside LVGL's own
+ * time and movement limits, which a thumb on a 172 px panel manages only sometimes,
+ * so the gesture that matters is carried by the hold. The list's half has no double —
+ * a second tap there is simply a second page.
  *
  * LVGL 9 tells single clicks from doubles itself (SINGLE_CLICKED / DOUBLE_CLICKED,
  * classified inside the long-press time), which is a good deal less code and less
  * guesswork than the hand-rolled window this used to keep: it also means a long
- * press sends no click at all, so a hold cannot be mistaken for a tap.
- *
- * The face's tap acts at once — it is the one that wants feedback, and its double
- * only switches view, which is orthogonal. The list's tap pages, which a double
- * cannot also do, so it waits out the window in a one-shot timer that the double
- * cancels. */
-/* The list's tap pages forward, but only if no second tap arrives: paging straight
- * away and undoing it on a double flickers through a page nobody asked for. The wait
- * is counted in ui_tick's own 200 ms beats rather than kept in a one-shot lv_timer,
- * because it has to outlast LVGL's double-click classification — and three beats
- * (~600 ms) clears even a deliberate double. */
-#define PAGE_DELAY_TICKS 3
+ * press sends no click at all, so a hold cannot be mistaken for a tap. */
 static lv_timer_t *s_ui_timer;     /* the 200 ms ui_tick timer, owned per screen */
-
-static void page_delay_cancel(void)
-{
-    s_page_due = 0;
-}
 
 /* Where the click was, and which half that is. LVGL 9 hands the indev over as the
  * event's parameter. */
@@ -1629,38 +1513,46 @@ static bool       s_have_tap;
 static void screen_event_cb(lv_event_t *e)
 {
     switch (lv_event_get_code(e)) {
-    case LV_EVENT_SINGLE_CLICKED: {
-        lv_point_t p = { 0, 0 };
+    /* Every click LVGL sends — single, double, or the triple it counts a third tap
+     * as — is judged here by the half it landed in, and by our own reading of the
+     * pair. Our own is needed because LVGL only calls two taps a double when they fall
+     * inside its movement limit, which a thumb on a 172 px panel manages only
+     * sometimes; and the triple is handled because LVGL sends *that* for the third of
+     * a run of taps, so a tap the user made would otherwise go nowhere. */
+    case LV_EVENT_SINGLE_CLICKED:
+    case LV_EVENT_DOUBLE_CLICKED:
+    case LV_EVENT_TRIPLE_CLICKED: {
+        const lv_event_code_t code = lv_event_get_code(e);
+        lv_point_t            p    = { 0, 0 };
 
         if (!event_point(e, &p)) {
             break;
         }
 
-        const bool     list_half = (p.y >= SCR_H / 2);
-        const bool     dbl = s_have_tap &&
-                             lv_tick_elaps(s_last_tap_ms) <= DOUBLE_MS &&
-                             LV_ABS(p.x - s_last_tap_p.x) <= DOUBLE_MAX_PX &&
-                             LV_ABS(p.y - s_last_tap_p.y) <= DOUBLE_MAX_PX;
+        const bool list_half = (p.y >= SCR_H / 2);
+        const bool dbl       = (code == LV_EVENT_DOUBLE_CLICKED) ||
+                               (code == LV_EVENT_SINGLE_CLICKED && s_have_tap &&
+                                lv_tick_elaps(s_last_tap_ms) <= DOUBLE_MS &&
+                                LV_ABS(p.x - s_last_tap_p.x) <= DOUBLE_MAX_PX &&
+                                LV_ABS(p.y - s_last_tap_p.y) <= DOUBLE_MAX_PX);
 
         /* The device's own account of every tap: the harness cannot see this panel's
          * indev, so without it a tap that does nothing says nothing. */
         UI_LOGI(TAG, "tap %s (%d,%d)%s", list_half ? "list" : "face", (int)p.x, (int)p.y,
                 dbl ? ", double" : "");
 
-        s_have_tap    = !dbl;
         s_last_tap_ms = lv_tick_get();
         s_last_tap_p  = p;
+        s_have_tap    = (code == LV_EVENT_SINGLE_CLICKED) && !dbl;   /* a double consumes
+                                                                      * the pair */
 
-        if (dbl) {
+        if (list_half) {
+            /* One page per tap, whatever LVGL calls it: the list's half has no double
+             * of its own, so the second tap of a pair is simply the second page. */
+            ui_companion_on_page(1);
+        } else if (dbl) {
             s_doubles++;
-            page_delay_cancel();
-            if (list_half) {
-                ui_companion_on_toggle_overlay();
-            } else {
-                ui_companion_on_switch_view(1);
-            }
-        } else if (list_half) {
-            s_page_due = PAGE_DELAY_TICKS;
+            ui_companion_on_switch_view(1);
         } else {
             ui_companion_on_tap();
         }
@@ -1670,35 +1562,9 @@ static void screen_event_cb(lv_event_t *e)
     case LV_EVENT_LONG_PRESSED:
         s_longs++;
         s_have_tap = false;   /* a hold is not the first half of a double */
-        page_delay_cancel();
-        ui_companion_on_toggle_overlay();
+        UI_LOGI(TAG, "hold %u: the other view", (unsigned)s_longs);
+        ui_companion_on_switch_view(1);
         break;
-
-    case LV_EVENT_DOUBLE_CLICKED: {
-        /* LVGL saw the pair itself, which means the taps were close enough for its own
-         * movement limit: it sends this *instead of* a second SINGLE_CLICKED, so this
-         * is the only notice of the pair. Clear the flag so the next tap cannot read as
-         * half of another, and act. */
-        lv_point_t p = { 0, 0 };
-
-        s_have_tap = false;
-
-        if (!event_point(e, &p)) {
-            break;
-        }
-
-        s_doubles++;
-        page_delay_cancel();
-        UI_LOGI(TAG, "tap %s (%d,%d), double", (p.y >= SCR_H / 2) ? "list" : "face",
-                (int)p.x, (int)p.y);
-
-        if (p.y >= SCR_H / 2) {
-            ui_companion_on_toggle_overlay();
-        } else {
-            ui_companion_on_switch_view(1);
-        }
-        break;
-    }
 
     default:
         break;
@@ -1738,7 +1604,7 @@ void ui_companion_create(void)
 
     /* Two views, each a container at the screen's origin, so every child keeps the
      * coordinates it would have had on the screen itself and switching views is a
-     * single hidden flag. The overlay is created on demand and sits above both. */
+     * single hidden flag. */
     for (int i = 0; i < 2; i++) {
         lv_obj_t *c = lv_obj_create(scr);
 
@@ -1826,8 +1692,8 @@ void ui_companion_create(void)
     lv_obj_set_style_pad_all(s_face, 0, 0);
     mood_face_create(s_face);
 
-    /* One row per agent: dot, label, state. PAGE_DELAY_TICKS's paging swaps which
-     * slice of the list is shown, never the rows themselves. */
+    /* One row per agent: dot, label, state. Paging swaps which slice of the list is
+     * shown, never the rows themselves. */
     for (int i = 0; i < UI_ROWS; i++) {
         lv_obj_t *row = lv_obj_create(s_mood_cont);
         make_passive(row);
@@ -1926,16 +1792,12 @@ void ui_companion_create(void)
         lv_obj_add_flag(s_stats_dot[i], LV_OBJ_FLAG_HIDDEN);
     }
 
-    /* A rebuilt screen starts on the companion view, page one, no overlay: those
-     * pointers all died with the previous screen. */
-    s_page_due = 0;
-
+    /* A rebuilt screen starts on the companion view, first page: every widget of
+     * the previous screen died with it. */
     s_view            = UI_VIEW_MOOD;
     s_page         = 0;
     s_stats_page   = 0;
     s_stats_pages  = 2;
-    s_overlay      = NULL;
-    s_overlay_text = NULL;
     ui_apply_view();
 
     /* Deterministic first frame: OFFLINE matches the pre-poll shared state

@@ -394,7 +394,7 @@ static void poll_once(void)
         return;
     }
 
-    /* The round trip the overlay shows is the request itself, not the wait for
+    /* The round trip the stats view shows is the request itself, not the wait for
      * the next poll: connect + GET + body, measured with the same clock the
      * other tasks use. */
     const int64_t t0 = esp_timer_get_time();

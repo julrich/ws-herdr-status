@@ -664,12 +664,21 @@ is ever wanted again, two things measured while it was:
 
 - **LVGL owns the input path, and the vocabulary is positional.** The panel is
   single-touch (§7), so the port's own pointer indev is enough; `ui_companion.c`'s
-  `screen_event_cb` reads `LV_EVENT_SINGLE_CLICKED`, `LV_EVENT_DOUBLE_CLICKED` and
-  `LV_EVENT_LONG_PRESSED` and nothing else. LVGL 9 classifies single and double
-  clicks itself, inside the long-press time, which is less code and less guesswork
-  than the hand-rolled window this used to carry — and it means **a long press sends
-  no click at all**, so a hold cannot also read as a tap and there is nothing to
-  suppress. Note that **`lv_event_get_indev()` is NULL for these events**: the indev
+  `screen_event_cb` handles `LV_EVENT_SINGLE_CLICKED`, `LV_EVENT_DOUBLE_CLICKED`,
+  `LV_EVENT_TRIPLE_CLICKED` and `LV_EVENT_LONG_PRESSED`. Three things there are worth
+  not re-learning:
+
+  - **A third tap of a run arrives as `TRIPLE_CLICKED`**, not as another SINGLE: LVGL
+    counts the streak (1 → single, 2 → double, 3 → triple). Leaving it unhandled
+    silently loses a tap the user made — it cost a page in the paging scenario.
+  - **Our own reading of the pair is still needed.** LVGL calls two taps a double only
+    when they fall inside its own movement limit, which a thumb on this panel rarely
+    manages, so the handler also pairs two `SINGLE_CLICKED` events itself (600 ms,
+    40 px apart at most).
+  - **A long press sends no click at all**, so a hold cannot also read as a tap and
+    there is nothing to suppress.
+
+  Note that **`lv_event_get_indev()` is NULL for these events**: the indev
   arrives as the event's *parameter* (`lv_event_get_param`), which is how the half is
   worked out. There is no input task, no gesture recogniser of our own, and no
   `lvgl_port_remove_touch` — that whole path existed only to read a second point
@@ -678,34 +687,35 @@ is ever wanted again, two things measured while it was:
   they were the least reliable input on this panel: a drag that LVGL reads as a
   gesture *also suppresses the click*, so a swipe that fell short did nothing at
   all, and one that ran on into the wrong object did the wrong thing. The screen
-  is small enough to reach every corner, so input is a tap or a double tap in one
-  of two halves:
+  is small enough to reach every corner, so input is a tap in one of two halves, a
+  hold anywhere, and a double tap that is the hold's unreliable twin:
 
   | input | action |
   |---|---|
   | tap, the face's half | refresh from the bridge + the mood's flourish |
   | tap, the list's half | forward a page (agent list, or the stats page) |
   | double tap, the face's half | the other view (mood ↔ stats) |
-  | double tap, the list's half | the diagnostics overlay |
-  | hold, anywhere | the overlay too |
+  | hold, anywhere | the other view too, and nothing else |
+
+  **The hold is the one that has to work.** A double tap needs both taps inside
+  LVGL's own limits, which a thumb on a 172 px panel manages only sometimes, so the
+  gesture that matters is carried by the hold and the double is the bonus. The hold
+  used to raise a diagnostics overlay instead, and a double tap of the list's half
+  was its other door; both are gone, because the stats view's second page already
+  carries the link and device figures. Only the heap low-water mark went with it.
 
 - The halves are **equal halves of the long side**, and the artwork keeps its roles
   in the layout `ui_layout_init` sets out: the face occupies the top half and the
   list the bottom, so "the face's half" is always the top one. There is no other
   orientation — see "Orientation: there isn't one".
-- Two asymmetries are deliberate. The **face's tap is immediate** — it is the one
-  that wants feedback, and its double (the view switch) is orthogonal, so both may
-  happen on a double. The **list's tap is deferred by `PAGE_DELAY_TICKS`** (three of
-  `ui_tick`'s 200 ms beats, ~600 ms) and cancelled by a double: paging is not
-  orthogonal to the overlay, so paging first and undoing it flickers through a page
-  nobody asked for. Anything delaying the *face* by that much would read as a laggy
-  poke, which is why it is not uniform.
-- **The page delay is counted in `ui_tick` beats, not in a one-shot `lv_timer`.**
-  Under LVGL 9 a timer created from inside the event callback never fired (measured:
-  the page simply never happened), and the delay has to outlast LVGL's own
-  double-click classification anyway. Three beats is comfortably clear of it.
-- The harness asserts the click rules by counting bridge polls: `0` after a long
-  press, `1` after a tap or a double tap (a double is a tap plus its second click).
+- The **face's tap is immediate** — it is the one that wants feedback, and its double
+  (the view switch) is orthogonal, so both may happen on a double. The **list's tap
+  pages on the tap itself**: the three-beat delay it used to carry existed only so a
+  double tap there could cancel it, and with the overlay gone there is no double on
+  the list to wait for. A second tap there is simply a second page.
+- The harness asserts the click rules by counting bridge polls: `0` after a hold, `1`
+  after a tap or a double tap (a double is a tap plus its second click) — and the hold
+  scenario asserts the view it lands on, in both directions.
 - **Two thresholds on the device's indev are tuned for a finger.** LVGL classifies a
   double click itself, but only when the two taps fall within `scroll_limit` of each
   other — 10 px by default, which a thumb on a 172 px panel rarely manages, so the
@@ -722,9 +732,6 @@ is ever wanted again, two things measured while it was:
   switching is one hidden flag. Do not turn them into separate LVGL screens:
   main.c's rebuild path auto-deletes the old screen, so a second screen's stored
   pointer would dangle.
-- The diagnostics overlay is created on demand and deleted on the next long
-  press; `ui_companion_create()` clears those pointers because they die with the
-  screen.
 - **The stats view is a two-column table**, sessions first: a header and three
   totals lines, then one row per agent (a state-coloured dot, the label with its
   token count, and the cost right-aligned), and the link/device page behind it. Each

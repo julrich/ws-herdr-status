@@ -6,7 +6,8 @@
 extern "C" {
 #endif
 
-/* What the companion is showing. Swiped left/right between the two. */
+/* What the companion is showing. A double tap on the face's half, or a hold, moves
+ * between the two. */
 typedef enum {
     UI_VIEW_MOOD = 0, /* the face plus the agent list (the default view) */
     UI_VIEW_STATS,    /* session statistics for the agents */
@@ -19,21 +20,22 @@ typedef enum {
 void ui_companion_create(void);
 
 /* ---- input handlers --------------------------------------------------------
- * The screen's LVGL event callbacks call these (click, long press, gesture), and
- * the host harness calls them directly — the panel reports one touch, so LVGL's
- * own event model is the whole input path. */
+ * The screen's LVGL event callbacks call these, and the host harness calls them
+ * directly — the panel reports one touch, so LVGL's own event model is the whole
+ * input path. */
 
-/* Single tap: refresh from the bridge and play the mood's flourish. */
+/* Tap on the face's half: refresh from the bridge and play the mood's flourish. */
 void ui_companion_on_tap(void);
 
-/* Two-finger tap: show or hide the diagnostics overlay. */
-void ui_companion_on_toggle_overlay(void);
-
-/* Horizontal one-finger swipe: -1 for left, +1 for right, wrapping around. */
+/* Hold anywhere, or a double tap on the face's half. The hold is the one that has
+ * to work: a double tap depends on both taps landing inside LVGL's own limits, and
+ * a thumb on this panel manages that only sometimes. `dir` is -1 or +1 for the
+ * neighbouring view, wrapping around. */
 void ui_companion_on_switch_view(int dir);
 
-/* Vertical one-finger swipe: -1 up, +1 down. Pages the agent list when the
- * bridge reports more agents than the layout has rows; ignoring it otherwise. */
+/* Tap on the list's half: forward a page. Pages the agent list when the bridge
+ * reports more agents than the layout has rows, and the stats view's own pages
+ * when that is the view showing. */
 void ui_companion_on_page(int dir);
 
 /* Which view is showing, for logs and tests. */

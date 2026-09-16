@@ -79,17 +79,18 @@ be added to `sdkconfig.defaults`.
   plays as feedback.
 - **Tap the bottom half** (the list) to page the agent list when more agents are
   running than fit on the screen.
-- **Double tap the top half** to switch between the mood view and the stats view.
-  The stats view opens on the sessions page — tokens in and out, calls, messages
-  and the money spent, with a row per agent — and the list's half pages to the
-  link and device figures.
-- **Double tap the bottom half**, or **hold a finger down** (~1 s) anywhere, to
-  raise the diagnostics overlay (heap, LVGL pool, link health, input counters). The same double tap, or another hold, drops it.
+- **Hold a finger down** (~1 s) anywhere to switch between the mood view and the
+  stats view. The stats view opens on the sessions page — tokens in and out, calls,
+  messages and the money spent, with a row per agent — and a tap on the list's half
+  pages to the link and device figures.
+- **Double tap the top half** does the same switch, but prefer the hold: it needs
+  both taps inside LVGL's own time and movement limits, which a thumb on a 172 px
+  panel manages only sometimes.
 
-The panel reports a single touch, so that is the whole vocabulary: two halves,
-tap or double tap in each, plus a hold. Swipes were tried first and dropped — a
-drag that LVGL reads as a gesture also suppresses the click, so a swipe that fell
-short did nothing at all (AGENTS.md §11).
+The panel reports a single touch, so that is the whole vocabulary: a tap in each
+half, a hold anywhere, and a double tap on the face's half for what the hold does.
+Swipes were tried first and dropped — a drag that LVGL reads as a gesture also
+suppresses the click, so a swipe that fell short did nothing at all (AGENTS.md §11).
 - The face tells you the aggregate mood at a glance; the headline and list tell
   you which agents are responsible:
 

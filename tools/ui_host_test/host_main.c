@@ -133,11 +133,6 @@ uint32_t ui_device_free_heap(void)
     return 180u * 1024u;
 }
 
-uint32_t ui_device_min_free_heap(void)
-{
-    return 150u * 1024u;
-}
-
 /* ------------------------------------------------------------------ */
 /* Display + pointer input                                             */
 /* ------------------------------------------------------------------ */
@@ -338,7 +333,7 @@ static void load_scenario(const char *name)
     else if(strcmp(name, "working") == 0 || strcmp(name, "alive") == 0 || strcmp(name, "glint") == 0
             || strcmp(name, "motes") == 0
             || strcmp(name, "land_working") == 0
-            || strcmp(name, "view_switch") == 0 || strcmp(name, "overlay") == 0
+            || strcmp(name, "view_switch") == 0 || strcmp(name, "hold") == 0
             || strcmp(name, "flourish") == 0) {
         set_agent(0, "PoC", "omp", HERDR_ST_WORKING, true);
         set_agent(1, "Docs pass", "claude", HERDR_ST_IDLE, false);
@@ -1281,10 +1276,10 @@ static void check_stats(result_t *r)
     EXPECT(r, assert_text(STATS_Y0 + 9 * STATS_ROW_H, STATS_Y0 + 9 * STATS_ROW_H + 6, "", got, sizeof got),
            "line 10 of the sessions page should be empty, got \"%s\"", got);
 
-    /* Page two: the link and the device, one tap on the list's half away — deferred
-     * by the double window, like every list tap. */
+    /* Page two: the link and the device — where the diagnostics the hold used to
+     * raise now live — one tap on the list's half away. */
     click_at(LIST_HALF_X, LIST_HALF_Y);
-    render(20);
+    render(10);
 
     EXPECT(r, assert_text(0, 30, "STATS  2/2", got, sizeof got),
            "second page marker want \"STATS  2/2\" got \"%s\"", got);
@@ -1322,7 +1317,7 @@ static void check_paging(result_t *r)
            "page 1 row 4 want \"Delta\" got \"%s\"", got);
 
     click_at(LIST_HALF_X, LIST_HALF_Y);   /* tap the list's half: forward a page */
-    render(20);   /* the page waits out the double window (~350 ms) before it moves */
+    render(10);   /* the page lands on the tap, with nothing waiting to cancel it */
 
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "Echo", got, sizeof got),
            "page 2 row 1 want \"Echo\" got \"%s\"", got);
@@ -1336,67 +1331,63 @@ static void check_paging(result_t *r)
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "> Alpha", got, sizeof got),
            "wrapping the list gave row 1 \"%s\"", got);
 
-    /* The list's double tap is the overlay's other door, and the list must not move:
-     * the tap that opened the double only scheduled a page, and the double cancels
-     * it. Rendered well past the double window, so a page that was only deferred
-     * would have landed by now. */
+    /* The list's half has no double of its own: a second tap there is a second page,
+     * and the view stays put. Two pages is a full lap of a two-page list, so this
+     * lands back where it started — and it lands at once, with nothing waiting out a
+     * window for a tap that may never come. */
     double_click_at(LIST_HALF_X, LIST_HALF_Y);
-    render(20);
+    render(10);
+    EXPECT(r, ui_companion_view() == UI_VIEW_MOOD,
+           "the list's double changed the view to %s", ui_view_name(ui_companion_view()));
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "> Alpha", got, sizeof got),
-           "the list's double moved the page: want \"> Alpha\" got \"%s\"", got);
-    EXPECT(r, pixel_at(BODY_CX, BODY_CY) < 0x202020u,
-           "the list's double did not raise the overlay (#%06X)",
-           (unsigned)pixel_at(BODY_CX, BODY_CY));
+           "two taps on the list should page a full lap: want \"> Alpha\" got \"%s\"", got);
 
-    double_click_at(LIST_HALF_X, LIST_HALF_Y);   /* again: it goes back down */
-    render(20);
-    render(20);   /* let the mood-change burst settle: its wash is not the face */
-    {
-        char why[64];
-        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
-    }
-
-    /* And the single does page, once the window has passed. */
+    /* An odd number of taps lands on the other page. */
     click_at(LIST_HALF_X, LIST_HALF_Y);
-    render(20);
+    render(10);
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "Echo", got, sizeof got),
            "a single tap on the list's half did not page: want \"Echo\" got \"%s\"", got);
 }
 
-/* The overlay covers the screen while it is on, and leaves nothing behind. */
-static void check_overlay(result_t *r)
+/* A hold takes the view to the stats pages and brings it back — and, because a hold
+ * is not a tap, never refreshes from the bridge. This is the gesture that has to
+ * work: the double tap needs both taps inside LVGL's own limits. */
+static void check_hold(result_t *r)
 {
+    char got[32];
+
     render(20);   /* let the mood-change burst settle: its wash is not the face */
     {
         char why[64];
         EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
     }
+    EXPECT(r, ui_companion_view() == UI_VIEW_MOOD, "started in view %s",
+           ui_view_name(ui_companion_view()));
 
-    /* Hold a finger down well past the long-press time main.c sets (600 ms), then
-     * let go: a hold that lands exactly on the threshold is classified either way. */
+    /* Hold well past the long-press time main.c sets (600 ms), then let go: a hold
+     * that lands exactly on the threshold is classified either way. */
     g_poll_now_calls = 0;
     post_press(BODY_CX, BODY_CY);
     render(30);   /* 900 ms */
     post_release();
     render(4);
 
-    /* The panel is a 94%-opaque wash of COL_BG, so the face must be gone even
-     * though the exact pixel is no longer the bare background colour. */
-    EXPECT(r, pixel_at(BODY_CX, BODY_CY) != expect_rgb(COL_WORKING),
-           "long press did not raise the overlay (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
-    EXPECT(r, pixel_at(BODY_CX, BODY_CY) < 0x202020u,
-           "the overlay is not dark (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
+    EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "a hold gave view %s",
+           ui_view_name(ui_companion_view()));
+    EXPECT(r, assert_text(0, 30, "STATS  1/2", got, sizeof got),
+           "the hold did not land on the stats page: want \"STATS  1/2\" got \"%s\"", got);
 
-    /* LVGL sends CLICKED on release "regardless to long press" (lv_event.h), and
-     * a click would refresh from the bridge. It must not: the press was a long
-     * press, and only a real tap is a tap. */
+    /* LVGL sends CLICKED on release "regardless to long press" (lv_event.h), and a
+     * click would refresh from the bridge. It must not: the press was a hold. */
     EXPECT(r, g_poll_now_calls == 0,
-           "a long press also read as a tap (%d bridge polls)", g_poll_now_calls);
+           "a hold also read as a tap (%d bridge polls)", g_poll_now_calls);
 
-    post_press(BODY_CX, BODY_CY);   /* a second long press drops it again */
-    render(20);
+    post_press(BODY_CX, BODY_CY);   /* a second hold takes it back */
+    render(30);
     post_release();
     render(4);
+    EXPECT(r, ui_companion_view() == UI_VIEW_MOOD, "a second hold gave view %s",
+           ui_view_name(ui_companion_view()));
     render(20);   /* let the mood-change burst settle: its wash is not the face */
     {
         char why[64];
@@ -1610,7 +1601,7 @@ int main(void)
         { "paging",      check_paging },
         { "stats",       check_stats  },
         { "live_rows",   check_live_rows },
-        { "overlay",     check_overlay },
+        { "hold",        check_hold    },
         { "flourish",    check_flourish },
     };
     const size_t n      = sizeof scenarios / sizeof scenarios[0];
