@@ -55,7 +55,7 @@ static lv_coord_t s_scr_w, s_scr_h;   /* the screen's size, read once at create 
 #define SCR_H       (s_scr_h)
 #define HEADLINE_Y  10
 #define BODY_CX     (SCR_W / 2)   /* the face is centred on the panel */
-#define BODY_CY     111           /* ~5% below the panel's centre: the widget draws its
+#define BODY_CY     108           /* just under the panel's centre: the widget draws its
                                      mouth under its own centre, so the box sits a little
                                      higher than the art looks */
 #define BODY_D      100           /* the face's panel: the widget fills whatever it gets */
@@ -69,6 +69,8 @@ static lv_coord_t s_scr_w, s_scr_h;   /* the screen's size, read once at create 
 #define LIST_ROW_H  24
 #define LIST_W      (SCR_W - 16)
 #define SUMMARY_Y   300
+#define RULE_Y      294       /* the hairline above the summary line */
+#define RULE_H      1
 
 /* Sizes that do not scale with the face. */
 #define BODY_SQUASH_D   8   /* how much the tap squash takes off the diameter */
@@ -237,7 +239,8 @@ static const char *TAG = "ui";
 
 static lv_obj_t *s_scr; /* the active screen: background tint target */
 static lv_obj_t *s_tint;       /* the mood-coloured panel behind the face */
-static lv_obj_t *s_activity;   /* its track */
+static lv_obj_t *s_rule;       /* the hairline above the summary line */
+static lv_obj_t *s_activity;   /* the bar between the panel and the list */
 static lv_obj_t *s_activity_hl;/* ...and the highlight that sweeps along it */
 static lv_obj_t *s_headline;
 static lv_obj_t *s_face;       /* the kawaii face's parent panel: it fills this */
@@ -1130,6 +1133,7 @@ static void ui_stats_render(void)
         stats_style(5 + i, false, STATS_TEXT_X);
         stats_line(5 + i, "%-9.9s %s", have ? s.agents[i].label : "?", tin);
         stats_val(5 + i, "%s", cost);
+        lv_obj_set_style_text_color(s_stats_val[5 + i], lv_color_hex(COL_MONEY), 0);
 
         lv_obj_set_pos(s_stats_dot[i], STATS_DOT_X, STATS_ROW_Y(5 + i) + 4);
         lv_obj_set_style_bg_color(
@@ -1259,18 +1263,20 @@ static void ui_apply_mood(mood_t mood)
 
     lv_obj_set_style_text_color(s_headline, lv_color_hex(ink), 0);
 
-    /* The activity bar sweeps while there is something to wait for, in the mood's own
-     * colour with a lighter highlight running along it. */
-    lv_obj_set_style_bg_color(s_activity, lv_color_hex(m->body), 0);
-    lv_obj_set_style_bg_color(s_activity_hl, lv_color_lighten(lv_color_hex(m->body), 120), 0);
+    /* The bar between the panel and the list is always there — it doubles as that
+     * boundary — and only *sweeps* while there is something to wait for: the track
+     * keeps the divider's colour, and the highlight that runs along it takes the
+     * mood's, so a quiet screen shows a plain line and a busy one moves. */
+    lv_obj_set_style_bg_color(s_activity, lv_color_hex(COL_DIM), 0);
+    lv_obj_set_style_bg_color(s_activity_hl, lv_color_hex(m->body), 0);
 
     lv_anim_del(s_activity_hl, anim_activity);
+    lv_obj_clear_flag(s_activity, LV_OBJ_FLAG_HIDDEN);
+
     if (m->busy) {
-        lv_obj_clear_flag(s_activity, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_activity_hl, LV_OBJ_FLAG_HIDDEN);
         start_anim(s_activity_hl, anim_activity, 0, 1000, m->activity_ms, 0, lv_anim_path_linear);
     } else {
-        lv_obj_add_flag(s_activity, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_activity_hl, LV_OBJ_FLAG_HIDDEN);
     }
 
@@ -1782,6 +1788,17 @@ void ui_companion_create(void)
 
         lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
     }
+
+    /* A hairline above the summary, in the colour the summary itself is drawn in. */
+    s_rule = lv_obj_create(s_mood_cont);
+    make_passive(s_rule);
+    lv_obj_set_size(s_rule, SCR_W, RULE_H);
+    lv_obj_set_pos(s_rule, 0, RULE_Y);
+    lv_obj_set_style_bg_color(s_rule, lv_color_hex(COL_DIM), 0);
+    lv_obj_set_style_bg_opa(s_rule, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_rule, 0, 0);
+    lv_obj_set_style_radius(s_rule, 0, 0);
+    lv_obj_set_style_pad_all(s_rule, 0, 0);
 
     s_summary = lv_label_create(s_mood_cont);
     make_passive(s_summary);

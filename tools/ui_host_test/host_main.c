@@ -34,7 +34,7 @@
 
 /* portrait (matches ui_layout_init's !split branch) */
 #define BODY_CX 86
-#define BODY_CY 111       /* the face's box centre, as ui_companion.c places it */
+#define BODY_CY 108       /* the face's box centre, as ui_companion.c places it */
 #define BODY_D  120
 #define LIST_Y0 190      /* portrait list geometry, from ui_layout_init() */
 #define LIST_ROW_H 24
