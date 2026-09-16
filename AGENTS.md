@@ -721,6 +721,11 @@ is ever wanted again, two things measured while it was:
   pages on the tap itself**: the three-beat delay it used to carry existed only so a
   double tap there could cancel it, and with the overlay gone there is no double on
   the list to wait for. A second tap there is simply a second page.
+- **The harness clears its framebuffer before each scenario** and invalidates the whole
+  screen, because nothing else ever does: a screen only paints the pixels it covers, so
+  without it a scenario reads whatever the previous one left behind. That is not
+  hypothetical — it made the bar's highlight measure 188 px while the animation had it
+  off-screen, and it would flake any assertion of the form "nothing is drawn here".
 - The harness asserts the click rules by counting bridge polls: `0` after a hold, `1`
   after a tap or a double tap (a double is a tap plus its second click) — and the hold
   scenario asserts the view it lands on, in both directions.
@@ -806,6 +811,17 @@ the poll cadence is `CONFIG_HERDR_POLL_PERIOD_MS` + one GET (~250 ms).
 Everything the face does is `lv_anim` + two `lv_timer`s, all in
 `main/ui_companion.c`:
 
+- **The bar's highlight is a wrapping window, not a travelling block.** Two objects
+  `ACT_HL_W` wide, both children of the bar — LVGL clips a child to its parent, so the
+  bar itself cuts them off at either end — and the second kept exactly one bar width
+  behind the first. That offset is the whole trick: as one window leaves on the right the
+  other arrives on the left, so the highlighted *length* never changes and the highlight
+  never appears or vanishes at an end (it used to pop in at full width and pop out).
+  It runs as two animations chained through a completed callback: an entry (`-ACT_HL_W`
+  to 0, at the same speed, so it takes `ACT_HL_W/ACT_W` of a lap), then laps of `0` to
+  `ACT_W` repeating. **`activity_ms` is now the time of one lap of the bar**, where it
+  used to be the time to cross all but the last window's width — so the same value is
+  ~30% faster than it was; the mood table's numbers were not retuned.
 - **One animation per property per mood.** `ui_apply_mood()` deletes each
   animation before restarting its replacement, and the mood table
   (`mood_cfg_t`) hands out one period/amplitude per feature. The properties in

@@ -241,8 +241,10 @@ static const char *TAG = "ui";
 static lv_obj_t *s_scr; /* the active screen: background tint target */
 static lv_obj_t *s_tint;       /* the mood-coloured panel behind the face */
 static lv_obj_t *s_rule;       /* the hairline above the summary line */
-static lv_obj_t *s_activity;   /* the bar between the panel and the list */
-static lv_obj_t *s_activity_hl;/* ...and the highlight that sweeps along it */
+static lv_obj_t *s_activity;      /* the bar between the panel and the list */
+static lv_obj_t *s_activity_hl[2];/* ...and the highlighted window that sweeps along
+                                   * it, plus the copy a bar-width behind that makes
+                                   * the window wrap rather than vanish and reappear */
 static lv_obj_t *s_headline;
 static lv_obj_t *s_face;       /* the kawaii face's parent panel: it fills this */
 static lv_obj_t *s_part[PART_N];
@@ -854,11 +856,62 @@ static void stats_line(int idx, const char *fmt, ...)
 
 /* The activity bar's highlight slides across its track: a plain linear sweep, the
  * shape of "something is happening" without a percentage to report. */
+/* Both objects move as one: `v` is the window's own x, in pixels, and the copy sits
+ * exactly one bar-width behind it. That offset is the whole trick — a window that runs
+ * off the right is followed in on the left by the copy, so the highlighted length never
+ * changes, and the bar's own clipping (the highlight is its child) hides the parts that
+ * are past either end. */
 static void anim_activity(void *var, int32_t v)
 {
-    lv_obj_t *hl = var;
+    (void)var;
 
-    lv_obj_set_x(hl, ACT_X + (ACT_W - ACT_HL_W) * v / 1000);
+    lv_obj_set_x(s_activity_hl[0], v);
+    lv_obj_set_x(s_activity_hl[1], v - ACT_W);
+}
+
+/* The sweep is two animations: one entry, then laps. The entry is the window sliding in
+ * from off the left, which is what the old one skipped — it appeared at full length and
+ * then travelled. It covers ACT_HL_W px of the same lap, so it takes that fraction of a
+ * lap's time and the window keeps one speed throughout. */
+static void activity_lap_start(uint32_t lap_ms);
+
+static void activity_entry_done(lv_anim_t *a)
+{
+    (void)a;
+
+    activity_lap_start(s_moods[s_mood].activity_ms);
+}
+
+static void activity_lap_start(uint32_t lap_ms)
+{
+    lv_anim_t a;
+
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_activity_hl[0]);
+    lv_anim_set_exec_cb(&a, anim_activity);
+    lv_anim_set_values(&a, 0, ACT_W);
+    lv_anim_set_time(&a, lap_ms);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&a, lv_anim_path_linear);
+    lv_anim_start(&a);
+}
+
+static void activity_start(uint32_t lap_ms)
+{
+    lv_anim_t a;
+
+    /* Place it before animating, so the first frame after a mood change shows it where
+     * the animation is about to start rather than where the last one left it. */
+    anim_activity(NULL, -ACT_HL_W);
+
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_activity_hl[0]);
+    lv_anim_set_exec_cb(&a, anim_activity);
+    lv_anim_set_values(&a, -ACT_HL_W, 0);
+    lv_anim_set_time(&a, (uint32_t)((uint64_t)ACT_HL_W * lap_ms / ACT_W));
+    lv_anim_set_path_cb(&a, lv_anim_path_linear);
+    lv_anim_set_completed_cb(&a, activity_entry_done);
+    lv_anim_start(&a);
 }
 
 /* Defined with the mood view's list; the session rows use the same colours. */
@@ -1199,23 +1252,30 @@ static void ui_apply_mood(mood_t mood)
      * line and a busy one moves. Two moods draw nothing: OFFLINE, where the link is
      * already the message, and SLEEP, where there are no agents for a bar to be about. */
     lv_obj_set_style_bg_color(s_activity, lv_color_hex(COL_DIM), 0);
-    lv_obj_set_style_bg_color(s_activity_hl, lv_color_hex(m->body), 0);
+    for (int i = 0; i < 2; i++) {
+        lv_obj_set_style_bg_color(s_activity_hl[i], lv_color_hex(m->body), 0);
+    }
 
-    lv_anim_del(s_activity_hl, anim_activity);
+    lv_anim_del(s_activity_hl[0], anim_activity);   /* takes the lap with it */
 
     if (!m->bar) {
         /* OFFLINE or SLEEP: nothing to show progress on — see ui_apply_mood. */
         lv_obj_add_flag(s_activity, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_activity_hl, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < 2; i++) {
+            lv_obj_add_flag(s_activity_hl[i], LV_OBJ_FLAG_HIDDEN);
+        }
     } else {
         lv_obj_clear_flag(s_activity, LV_OBJ_FLAG_HIDDEN);
 
         if (m->busy) {
-            lv_obj_clear_flag(s_activity_hl, LV_OBJ_FLAG_HIDDEN);
-            start_anim(s_activity_hl, anim_activity, 0, 1000, m->activity_ms, 0,
-                       lv_anim_path_linear);
+            for (int i = 0; i < 2; i++) {
+                lv_obj_clear_flag(s_activity_hl[i], LV_OBJ_FLAG_HIDDEN);
+            }
+            activity_start(m->activity_ms);
         } else {
-            lv_obj_add_flag(s_activity_hl, LV_OBJ_FLAG_HIDDEN);
+            for (int i = 0; i < 2; i++) {
+                lv_obj_add_flag(s_activity_hl[i], LV_OBJ_FLAG_HIDDEN);
+            }
         }
     }
 
@@ -1670,15 +1730,22 @@ void ui_companion_create(void)
     lv_obj_set_style_border_width(s_activity, 0, 0);
     lv_obj_set_style_pad_all(s_activity, 0, 0);
 
-    s_activity_hl = lv_obj_create(s_mood_cont);
-    make_passive(s_activity_hl);
-    lv_obj_set_size(s_activity_hl, ACT_HL_W, ACT_H);
-    lv_obj_set_pos(s_activity_hl, ACT_X, ACT_Y);
-    lv_obj_set_style_bg_color(s_activity_hl, lv_color_hex(COL_TEXT), 0);
-    lv_obj_set_style_bg_opa(s_activity_hl, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(s_activity_hl, ACT_H / 2, 0);
-    lv_obj_set_style_border_width(s_activity_hl, 0, 0);
-    lv_obj_set_style_pad_all(s_activity_hl, 0, 0);
+    /* The highlighted window, and the copy that follows it in. They are children of the
+     * bar on purpose: LVGL clips a child to its parent, so a window running past either
+     * end is cut off by the bar itself — which is what lets one slide in from the left
+     * and slide out on the right instead of appearing and vanishing at the ends. Both
+     * start off the left edge, so a fresh screen shows no highlight at all. */
+    for (int i = 0; i < 2; i++) {
+        s_activity_hl[i] = lv_obj_create(s_activity);
+        make_passive(s_activity_hl[i]);
+        lv_obj_set_size(s_activity_hl[i], ACT_HL_W, ACT_H);
+        lv_obj_set_pos(s_activity_hl[i], -ACT_HL_W, 0);
+        lv_obj_set_style_bg_color(s_activity_hl[i], lv_color_hex(COL_TEXT), 0);
+        lv_obj_set_style_bg_opa(s_activity_hl[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(s_activity_hl[i], ACT_H / 2, 0);
+        lv_obj_set_style_border_width(s_activity_hl[i], 0, 0);
+        lv_obj_set_style_pad_all(s_activity_hl[i], 0, 0);
+    }
 
     /* Bottom-most children: the mood-change rings wash out from behind the face. */
     for (int i = 0; i < RIPPLE_N; i++) {

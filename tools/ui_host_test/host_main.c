@@ -39,6 +39,8 @@
 #define LIST_Y0 190      /* portrait list geometry, from ui_layout_init() */
 #define BAR_Y   186      /* the divider between the panel and the list (TINT_H) */
 #define BAR_H   5
+#define BAR_HL_W 40      /* the highlighted window (ACT_HL_W) */
+#define BAR_LAP_MS 1400  /* one lap of the bar: the WORKING mood's activity_ms */
 #define LIST_ROW_H 24
 #define RING_D  138
 #define MOUTH_CY 126
@@ -334,6 +336,7 @@ static void load_scenario(const char *name)
             || strcmp(name, "motes") == 0
             || strcmp(name, "land_working") == 0
             || strcmp(name, "view_switch") == 0 || strcmp(name, "hold") == 0
+            || strcmp(name, "bar") == 0
             || strcmp(name, "flourish") == 0) {
         set_agent(0, "PoC", "omp", HERDR_ST_WORKING, true);
         set_agent(1, "Docs pass", "claude", HERDR_ST_IDLE, false);
@@ -1366,6 +1369,78 @@ static void check_paging(result_t *r)
            "a single tap on the list's half did not page: want \"Echo\" got \"%s\"", got);
 }
 
+/* The bar's sweep. The highlight is a window that enters from off the left, crosses the
+ * bar and wraps: a second copy one bar-width behind it means one leaves on the right
+ * exactly as the other arrives on the left, so the highlighted length never changes. */
+static int bar_ink(int x0, int x1)
+{
+    return count_exact(COL_WORKING, x0, x1, BAR_Y, BAR_Y + BAR_H - 1);
+}
+
+static void check_bar(result_t *r)
+{
+    const int full = BAR_HL_W * BAR_H;   /* 200 px: the window, once it is all inside */
+    int       lo = 1 << 20, hi = 0, both = 0;
+
+    /* The runner puts the UI through 600 ms of setup before a scenario starts, so by now
+     * the sweep has entered and is lapping. Watch a whole lap of the steady state. */
+    for(int i = 0; i < BAR_LAP_MS / 30 + 2; i++) {
+        int n;
+
+        render(1);
+        n = bar_ink(0, g_w - 1);
+        if(n < lo) lo = n;
+        if(n > hi) hi = n;
+        if(bar_ink(0, 12) > 0 && bar_ink(g_w - 13, g_w - 1) > 0) both++;
+    }
+
+    EXPECT(r, hi >= full * 3 / 4,
+           "the highlight never reached its length: the most it showed was %d px of %d",
+           hi, full);
+    /* ...and the wrap itself: ink at both ends of the bar at once, which a window that
+     * merely travelled from one end to the other can never produce. */
+    EXPECT(r, both > 0, "the highlight never wrapped: it was never at both ends at once");
+    /* The point of the pair: the same length throughout, because the copy takes over as
+     * the window leaves. A gap at either end would show up here as a low sample. */
+    EXPECT(r, lo > 0 && hi - lo <= hi / 4,
+           "the highlighted length is not constant across a lap: %d..%d px", lo, hi);
+
+    /* Now restart the sweep and watch the highlight appear. It has to slide in: the tick
+     * it first shows anything, that something must be a sliver at the left edge, not the
+     * whole window arriving at once. The mood change comes from the data, and the UI
+     * applies it on its own 200 ms beat, so the first lit tick is the one to judge. */
+    set_agent(0, "PoC", "omp", HERDR_ST_IDLE, true);
+    g_status.gen++;
+    render(8);   /* 240 ms: the mood has gone to IDLE and the highlight with it */
+
+    EXPECT(r, bar_ink(0, g_w - 1) == 0,
+           "the highlight is still up in a mood that does not sweep");
+
+    set_agent(0, "PoC", "omp", HERDR_ST_WORKING, true);
+    g_status.gen++;
+
+    {
+        int first = -1, peak = 0;
+
+        for(int i = 0; i < 12; i++) {
+            const int n = bar_ink(0, g_w - 1);
+
+            render(1);
+            if(n > 0) {
+                if(first < 0) first = n;
+                if(n > peak) peak = n;
+            }
+        }
+
+        EXPECT(r, first >= 0, "the highlight never came back after the mood changed");
+        EXPECT(r, first >= 0 && first < full / 2,
+               "the highlight appeared %d px of %d wide: it should slide in, not pop in",
+               first, full);
+        EXPECT(r, first >= 0 && peak > first,
+               "the highlight did not grow after appearing: %d then %d px", first, peak);
+    }
+}
+
 /* A hold takes the view to the stats pages and brings it back — and, because a hold
  * is not a tap, never refreshes from the bridge. This is the gesture that has to
  * work: the double tap needs both taps inside LVGL's own limits. */
@@ -1619,6 +1694,7 @@ int main(void)
         { "stats",       check_stats  },
         { "live_rows",   check_live_rows },
         { "hold",        check_hold    },
+        { "bar",         check_bar     },
         { "flourish",    check_flourish },
     };
     const size_t n      = sizeof scenarios / sizeof scenarios[0];
