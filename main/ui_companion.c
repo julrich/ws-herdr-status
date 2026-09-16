@@ -68,8 +68,10 @@ static lv_coord_t s_scr_w, s_scr_h;   /* the screen's size, read once at create 
 #define LIST_Y0     194
 #define LIST_ROW_H  24
 #define LIST_W      (SCR_W - 16)
-#define SUMMARY_Y   300
-#define RULE_Y      294       /* the hairline above the summary line */
+#define SUMMARY_Y   299   /* one pixel closer to the hairline, which is one
+                             * closer to the rows: the block reads thinner
+                             * at the same font size */
+#define RULE_Y      295       /* the hairline above the summary line */
 #define RULE_H      1
 
 /* Sizes that do not scale with the face. */
@@ -196,7 +198,8 @@ typedef struct {
     mood_face_t    reaction;   /* what a change into this mood plays first */
     /* Ambient particles only: the kawaii face brings its own eyes, blush, mouth,
      * tears and sparkles, so the blob's decorations are gone with the blob. */
-    bool           busy;       /* sweep the activity bar behind the headline */
+    bool           busy;       /* animate the bar between the panel and the list */
+    bool           bar;        /* ...and whether that bar is drawn at all */
     uint32_t       activity_ms;/* how long one sweep takes */
     uint32_t       mote_ms;    /* ambient mote cycle; 0 == none */
     lv_opa_t       mote_opa;   /* peak mote opacity */
@@ -211,21 +214,21 @@ static const mood_cfg_t s_moods[MOOD_N] = {
     /* Mood to expression. The kawaii face has seventeen, so each mood gets the one
      * that reads right, and a reaction that says what *changed* before the resting
      * expression takes over (see s_face_reaction in ui_tick). */
-    [MOOD_BLOCKED] = { .body = COL_BLOCKED, .headline = "NEEDS YOU",
+    [MOOD_BLOCKED] = { .bar = true, .body = COL_BLOCKED, .headline = "NEEDS YOU",
                        .face = MOOD_FACE_WORRIED,      .reaction = MOOD_FACE_SURPRISED },
-    [MOOD_WORKING] = { .body = COL_WORKING, .headline = "WORKING",
+    [MOOD_WORKING] = { .bar = true, .body = COL_WORKING, .headline = "WORKING",
                        .face = MOOD_FACE_WORKING,      .reaction = MOOD_FACE_COOL,
                        .busy = true, .activity_ms = 1400,
                        .mote_ms = 800, .mote_opa = 255, .mote_rise = 16 },
-    [MOOD_DONE]    = { .body = COL_DONE, .headline = "DONE",
+    [MOOD_DONE]    = { .bar = true, .body = COL_DONE, .headline = "DONE",
                        .face = MOOD_FACE_HAPPY,        .reaction = MOOD_FACE_EXCITED,
                        .party = true },
-    [MOOD_IDLE]    = { .body = COL_IDLE, .headline = "IDLE",
+    [MOOD_IDLE]    = { .bar = true, .body = COL_IDLE, .headline = "IDLE",
                        .face = MOOD_FACE_NEUTRAL,      .reaction = MOOD_FACE_SMIRK },
-    [MOOD_SLEEP]   = { .body = COL_SLEEP, .headline = "NO AGENTS",
+    [MOOD_SLEEP]   = { .bar = true, .body = COL_SLEEP, .headline = "NO AGENTS",
                        .face = MOOD_FACE_SLEEPY,       .reaction = MOOD_FACE_SLEEPY,
                        .mote_ms = 3200, .mote_opa = 110, .mote_rise = 26 },
-    [MOOD_OFFLINE] = { .body = COL_OFFLINE, .headline = "OFFLINE",
+    [MOOD_OFFLINE] = { .body = COL_OFFLINE, .headline = "OFFLINE", .bar = false,
                        .face = MOOD_FACE_SAD,          .reaction = MOOD_FACE_CONFUSED },
 };
 
@@ -1271,13 +1274,21 @@ static void ui_apply_mood(mood_t mood)
     lv_obj_set_style_bg_color(s_activity_hl, lv_color_hex(m->body), 0);
 
     lv_anim_del(s_activity_hl, anim_activity);
-    lv_obj_clear_flag(s_activity, LV_OBJ_FLAG_HIDDEN);
 
-    if (m->busy) {
-        lv_obj_clear_flag(s_activity_hl, LV_OBJ_FLAG_HIDDEN);
-        start_anim(s_activity_hl, anim_activity, 0, 1000, m->activity_ms, 0, lv_anim_path_linear);
-    } else {
+    if (!m->bar) {
+        /* OFFLINE: nothing to show progress on, and the link is already the message. */
+        lv_obj_add_flag(s_activity, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_activity_hl, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(s_activity, LV_OBJ_FLAG_HIDDEN);
+
+        if (m->busy) {
+            lv_obj_clear_flag(s_activity_hl, LV_OBJ_FLAG_HIDDEN);
+            start_anim(s_activity_hl, anim_activity, 0, 1000, m->activity_ms, 0,
+                       lv_anim_path_linear);
+        } else {
+            lv_obj_add_flag(s_activity_hl, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     /* The face reacts to the change first and settles into the mood's own
@@ -1363,7 +1374,6 @@ static void ui_render_list(const herdr_status_t *s)
         lv_obj_set_style_bg_color(s_dot[i], lv_color_hex(state_colour(a->state)), 0);
         lv_obj_set_style_opa(s_dot[i], s->online ? LV_OPA_COVER : 100, 0);
         lv_obj_set_style_text_color(s_row_label[i], lv_color_hex(s->online ? COL_TEXT : COL_DIM), 0);
-        lv_obj_set_style_text_color(s_row_status[i], lv_color_hex(s->online ? COL_TEXT : COL_DIM), 0);
     }
 }
 
@@ -1587,15 +1597,11 @@ static void page_delay_cancel(void)
     s_page_due = 0;
 }
 
-/* Which half the pointer is in. Portrait: the list is the bottom half. Landscape:
- * the list is the right half, its column starting at x=148 of 320. */
-static bool event_in_list_half(lv_event_t *e)
+/* Where the click was, and which half that is. LVGL 9 hands the indev over as the
+ * event's parameter. */
+static bool event_point(lv_event_t *e, lv_point_t *p)
 {
-    /* LVGL 9 hands the indev over as the event's parameter; lv_event_get_indev() is
-     * NULL for these click events. Fall back to the active indev, which is this one
-     * while its own event is being dispatched. */
     const lv_indev_t *indev = lv_event_get_param(e);
-    lv_point_t        p = { 0, 0 };
 
     if (indev == NULL) {
         indev = lv_indev_active();
@@ -1603,37 +1609,96 @@ static bool event_in_list_half(lv_event_t *e)
     if (indev == NULL) {
         return false;
     }
-    lv_indev_get_point(indev, &p);
 
-    return (p.y >= SCR_H / 2);
+    lv_indev_get_point(indev, p);
+    return true;
 }
+
+/* Two taps within this window and this distance are one double. LVGL 9 classifies
+ * doubles itself, but only while the taps stay inside its own movement limit — and on
+ * this panel's real touches that was never satisfied, so the pair is judged here from
+ * the SINGLE_CLICKED events it sends for *every* tap. DOUBLE_CLICKED is then ignored
+ * (barring forgetting the pair), or a tight double would be handled twice. */
+#define DOUBLE_MS      600
+#define DOUBLE_MAX_PX  40
+
+static uint32_t   s_last_tap_ms;
+static lv_point_t s_last_tap_p;
+static bool       s_have_tap;
 
 static void screen_event_cb(lv_event_t *e)
 {
     switch (lv_event_get_code(e)) {
-    case LV_EVENT_SINGLE_CLICKED:
-        if (event_in_list_half(e)) {
+    case LV_EVENT_SINGLE_CLICKED: {
+        lv_point_t p = { 0, 0 };
+
+        if (!event_point(e, &p)) {
+            break;
+        }
+
+        const bool     list_half = (p.y >= SCR_H / 2);
+        const bool     dbl = s_have_tap &&
+                             lv_tick_elaps(s_last_tap_ms) <= DOUBLE_MS &&
+                             LV_ABS(p.x - s_last_tap_p.x) <= DOUBLE_MAX_PX &&
+                             LV_ABS(p.y - s_last_tap_p.y) <= DOUBLE_MAX_PX;
+
+        /* The device's own account of every tap: the harness cannot see this panel's
+         * indev, so without it a tap that does nothing says nothing. */
+        UI_LOGI(TAG, "tap %s (%d,%d)%s", list_half ? "list" : "face", (int)p.x, (int)p.y,
+                dbl ? ", double" : "");
+
+        s_have_tap    = !dbl;
+        s_last_tap_ms = lv_tick_get();
+        s_last_tap_p  = p;
+
+        if (dbl) {
+            s_doubles++;
+            page_delay_cancel();
+            if (list_half) {
+                ui_companion_on_toggle_overlay();
+            } else {
+                ui_companion_on_switch_view(1);
+            }
+        } else if (list_half) {
             s_page_due = PAGE_DELAY_TICKS;
         } else {
             ui_companion_on_tap();
         }
         break;
+    }
 
-    case LV_EVENT_DOUBLE_CLICKED:
-        page_delay_cancel();   /* the pair means the overlay, not a page */
+    case LV_EVENT_LONG_PRESSED:
+        s_longs++;
+        s_have_tap = false;   /* a hold is not the first half of a double */
+        page_delay_cancel();
+        ui_companion_on_toggle_overlay();
+        break;
+
+    case LV_EVENT_DOUBLE_CLICKED: {
+        /* LVGL saw the pair itself, which means the taps were close enough for its own
+         * movement limit: it sends this *instead of* a second SINGLE_CLICKED, so this
+         * is the only notice of the pair. Clear the flag so the next tap cannot read as
+         * half of another, and act. */
+        lv_point_t p = { 0, 0 };
+
+        s_have_tap = false;
+
+        if (!event_point(e, &p)) {
+            break;
+        }
+
         s_doubles++;
+        page_delay_cancel();
+        UI_LOGI(TAG, "tap %s (%d,%d), double", (p.y >= SCR_H / 2) ? "list" : "face",
+                (int)p.x, (int)p.y);
 
-        if (event_in_list_half(e)) {
+        if (p.y >= SCR_H / 2) {
             ui_companion_on_toggle_overlay();
         } else {
             ui_companion_on_switch_view(1);
         }
         break;
-
-    case LV_EVENT_LONG_PRESSED:
-        s_longs++;
-        ui_companion_on_toggle_overlay();
-        break;
+    }
 
     default:
         break;

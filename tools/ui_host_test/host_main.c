@@ -635,6 +635,27 @@ static bool assert_text(int y_min, int y_max, const char *expected, char *got, s
     return false;
 }
 
+/* The colour a label is actually drawn in, found by the text it carries. The row's
+ * figures are specified colours, so this is a behaviour, not an implementation detail —
+ * and it is the only way to catch a later style write undoing one (which happened). */
+static bool label_colour_in(lv_obj_t *obj, const char *text, uint32_t rgb888)
+{
+    uint32_t n = lv_obj_get_child_cnt(obj);
+
+    for(uint32_t i = 0; i < n; i++) {
+        lv_obj_t *child = lv_obj_get_child(obj, (int32_t)i);
+        if(child == NULL) continue;
+
+        if(lv_obj_check_type(child, &lv_label_class) && obj_is_visible(child) &&
+           strcmp(lv_label_get_text(child), text) == 0) {
+            const lv_color_t c = lv_obj_get_style_text_color(child, LV_PART_MAIN);
+            return lv_color_to_int(c) == (int)(rgb888 & 0xFFFFFFu);
+        }
+        if(label_colour_in(child, text, rgb888)) return true;
+    }
+    return false;
+}
+
 /* Suffix match over every label in the band: a row holds both its name and its status
  * figure, and which of them comes first is not the check's business. */
 static bool assert_text_suffix_in(lv_obj_t *obj, int y_min, int y_max, const char *suffix)
@@ -1150,6 +1171,16 @@ static void check_live_rows(result_t *r)
     render(20);
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "4.3k/s", got, sizeof got),
            "the working row did not follow /stats to \"4.3k/s\", got \"%s\"", got);
+
+    /* ...and in the colours asked for: #5CD8FF for the rate, #FFC844 for the money. */
+    {
+        lv_obj_t *scr = lv_screen_active();
+
+        EXPECT(r, scr != NULL && label_colour_in(scr, "4.3k/s", 0x5CD8FFu),
+               "the rate is not drawn in #5CD8FF");
+        EXPECT(r, scr != NULL && label_colour_in(scr, "$5.38", 0xFFC844u),
+               "the spend is not drawn in #FFC844");
+    }
 }
 
 /* The stats view: the only place the session figures appear, and now a two-column
