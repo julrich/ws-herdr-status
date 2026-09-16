@@ -289,6 +289,8 @@ static int       s_page;          /* which slice of the agent list is shown */
 static lv_obj_t *s_mood_cont;     /* holds the whole companion view */
 static lv_obj_t *s_stats_cont;    /* holds the stats view */
 static lv_obj_t *s_stats_title;
+static lv_obj_t *s_panel_spend;   /* the panel's foot: the list's money, and its rate */
+static lv_obj_t *s_panel_rate;
 /* The stats view is a two-column table: a label on the left, a figure on the right,
  * a hairline under each section header, and a status dot in front of every session
  * row. The right column is a separate label because the fonts here are not
@@ -328,6 +330,9 @@ static uint32_t  s_doubles;
 #define ACT_W         SCR_W
 #define ACT_H         5
 #define ACT_HL_W      40
+/* The panel's foot, a few pixels in from the screen's edge and above the bar. */
+#define TOTAL_X       6
+#define TOTAL_Y       169
 #define MOOD_HEAD_Y   18     /* the headline sits under the bar, not on it: the highlight
                               * would otherwise sweep under the text and wreck its
                               * contrast on the way past */
@@ -730,6 +735,7 @@ static void ui_start_burst(void)
 static void ui_stats_render(void);
 static void ui_render_list(const herdr_status_t *s);
 static void ui_render_summary(const herdr_status_t *s);
+static void ui_render_totals(const herdr_status_t *s);
 
 const char *ui_view_name(ui_view_t view)
 {
@@ -1400,6 +1406,59 @@ static void ui_render_list(const herdr_status_t *s)
     }
 }
 
+/* The panel's foot: what every session in the list has cost altogether, and — while the
+ * mood is working — the rate they are adding tokens at, opposite it. Both are sums over
+ * the agents the list is showing rather than the bridge's own totals, which also count
+ * sessions herdr no longer reports, and both take the colours the rows use. */
+static void ui_render_totals(const herdr_status_t *s)
+{
+    if (s->count == 0) {
+        /* No list, no totals: the same two moods that clear the list clear these with it. */
+        lv_obj_add_flag(s_panel_spend, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_panel_rate, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    herdr_sessions_t sess = { 0 };
+    const bool       have = herdr_stats_get(&sess) && sess.valid;
+    uint32_t         cost = 0, rate = 0;
+    int              rated = 0;
+
+    if (have) {
+        for (int i = 0; i < s->count; i++) {
+            cost += sess.per[i].cost_micro;
+
+            if (sess.per[i].tokens_per_s > 0) {
+                rate += sess.per[i].tokens_per_s;
+                rated++;
+            }
+        }
+    }
+
+    if (have) {
+        char money[16];
+
+        fmt_cost(money, sizeof money, cost);
+        lv_label_set_text(s_panel_spend, money);
+        lv_obj_clear_flag(s_panel_spend, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_panel_spend, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    /* A rate only means anything while work is happening, and only when an agent
+     * reporting one is in the list. */
+    if (s_mood == MOOD_WORKING && rated > 0) {
+        char tok[16], per_s[24];
+
+        fmt_tokens(tok, sizeof tok, rate);
+        snprintf(per_s, sizeof per_s, "%s/s", tok);
+        lv_label_set_text(s_panel_rate, per_s);
+        lv_obj_clear_flag(s_panel_rate, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_panel_rate, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 static void ui_render_summary(const herdr_status_t *s)
 {
     if (!s->online) {
@@ -1545,6 +1604,7 @@ static void ui_tick(lv_timer_t *timer)
     }
     ui_render_list(&s);
     ui_render_summary(&s);
+    ui_render_totals(&s);
 
     /* The other two surfaces only need refreshing while they are visible. */
     if (s_view == UI_VIEW_STATS) {
@@ -1856,6 +1916,25 @@ void ui_companion_create(void)
     lv_obj_set_height(s_summary, lv_font_montserrat_12.line_height - 2);
     lv_obj_set_style_pad_top(s_summary, -1, 0);
     lv_obj_align(s_summary, LV_ALIGN_TOP_MID, 0, SUMMARY_Y - 1);
+
+    /* The panel's foot. Created last, so the mood-change rings and everything else in the
+     * panel draw underneath them. Both start hidden and say nothing until there is a list
+     * and a /stats answer to speak from. */
+    s_panel_spend = lv_label_create(s_mood_cont);
+    make_passive(s_panel_spend);
+    lv_obj_set_style_text_font(s_panel_spend, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_panel_spend, lv_color_hex(COL_MONEY), 0);
+    lv_obj_set_pos(s_panel_spend, TOTAL_X, TOTAL_Y);
+    lv_label_set_text(s_panel_spend, "");
+    lv_obj_add_flag(s_panel_spend, LV_OBJ_FLAG_HIDDEN);
+
+    s_panel_rate = lv_label_create(s_mood_cont);
+    make_passive(s_panel_rate);
+    lv_obj_set_style_text_font(s_panel_rate, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_panel_rate, lv_color_hex(COL_RATE), 0);
+    lv_obj_align(s_panel_rate, LV_ALIGN_TOP_RIGHT, -TOTAL_X, TOTAL_Y);
+    lv_label_set_text(s_panel_rate, "");
+    lv_obj_add_flag(s_panel_rate, LV_OBJ_FLAG_HIDDEN);
 
     /* Stats view: a title plus a fixed block of lines, refreshed by
      * ui_stats_render() whenever it is on screen. */

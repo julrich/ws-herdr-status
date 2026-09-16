@@ -40,6 +40,7 @@
 #define BAR_Y   186      /* the divider between the panel and the list (TINT_H) */
 #define BAR_H   5
 #define BAR_HL_W 40      /* the highlighted window (ACT_HL_W) */
+#define TOTAL_Y  169     /* the panel's foot: the list's spend and rate (TOTAL_Y) */
 #define BAR_LAP_MS 1400  /* one lap of the bar: the WORKING mood's activity_ms */
 #define LIST_ROW_H 24
 #define RING_D  138
@@ -72,9 +73,10 @@ static int g_h = 320;
 #define COL_WORKING_TINT 0x2292FF
 #define COL_DONE_TINT    0x25DE69
 #define TINT_OPA_BUSY    64
-/* Inside the panel, clear of the face and its ring, of the headline and of the motes. */
+/* Inside the panel, clear of the face and its ring, of the headline, of the motes and of
+ * the panel's own foot (which starts at TOTAL_Y). */
 #define PANEL_X 8
-#define PANEL_Y 175
+#define PANEL_Y 150
 #define COL_BG      0x0B0F14
 #define COL_FACE    0x0B0F14
 
@@ -861,10 +863,13 @@ static int bright_pixels_below_face(int threshold)
      * colour, so the baseline is what the strip looks like without a ring — sampled
      * at its corner, away from where the washer crosses: the strip sits between the
      * face's box (which ends at ~161) and the activity bar at 186. */
+    /* 164..167: the strip immediately under the face's box, kept clear of the panel's own
+     * foot, which is drawn at 169 and would be counted here otherwise. A ring is a wide arc
+     * and still crosses it. */
     const uint32_t base = pixel_at(20, 164);
     int            n    = 0;
 
-    for(int y = 164; y <= 180; y++) {
+    for(int y = 164; y <= 167; y++) {
         for(int x = 20; x <= 152; x++) {
             const uint32_t c = pixel_at(x, y);
 
@@ -1130,6 +1135,13 @@ static void check_offline(result_t *r)
            "the offline panel is #%06X, not the plain background #%06X",
            (unsigned)pixel_at(PANEL_X, PANEL_Y), (unsigned)expect_rgb(COL_BG));
 
+    /* The panel's foot goes with the list: an offline screen has no figures to show for
+     * agents it cannot vouch for. The panel has no wash here either, so anything drawn in
+     * that band would be a label. */
+    EXPECT(r, count_above_bg(0, g_w - 1, TOTAL_Y, BAR_Y - 1, 24) == 0,
+           "the panel's foot still draws %d pixels with no link",
+           count_above_bg(0, g_w - 1, TOTAL_Y, BAR_Y - 1, 24));
+
     /* The list is cleared while the link is down: whatever the last poll reported is
      * not something the device can still vouch for, and a stale "working" is worse than
      * a blank. The label and its dot both go. */
@@ -1290,6 +1302,15 @@ static void check_live_rows(result_t *r)
         EXPECT(r, scr != NULL && assert_text_suffix_in(scr, LIST_Y0 + 2, LIST_Y0 + 15, "/s"),
                "the working row want a token rate (\".../s\"), got \"%s\"", got);
     }
+    /* The panel's foot: the spend over the sessions *in the list* — which is the four
+     * rows added up, not the bridge's own total, since that one also counts sessions
+     * herdr no longer reports — and, because the mood is WORKING, the sum of the rates
+     * opposite it. */
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "$12.60", got, sizeof got),
+           "the panel's spend want \"$12.60\" (the four rows added up) got \"%s\"", got);
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "340/s", got, sizeof got),
+           "the panel's rate want \"340/s\" (four agents reporting 85/s) got \"%s\"", got);
+
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "working", got, sizeof got) == false,
            "the working row still shows the state word (\"%s\")", got);
 
@@ -1309,6 +1330,29 @@ static void check_live_rows(result_t *r)
         EXPECT(r, scr != NULL && label_colour_in(scr, "$5.38", 0xFFC844u),
                "the spend is not drawn in #FFC844");
     }
+
+    /* The panel's rate is the sum of the agents' rates — 4321 + three at 85, which
+     * fmt_tokens() truncates to one decimal — and it is a *working* figure: with nobody
+     * working it goes, while the spend stays, the sessions being there either way. */
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "4.5k/s", got, sizeof got),
+           "the panel's rate want \"4.5k/s\" (4321 + 3 x 85) got \"%s\"", got);
+
+    set_agent(0, "Waveshare", "omp", HERDR_ST_IDLE, true);
+    g_status.gen++;
+    render(20);
+
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "4.5k/s", got, sizeof got) == false,
+           "the panel's rate is still up in a mood that is not working: \"%s\"", got);
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "$12.60", got, sizeof got),
+           "the spend went with the rate: want \"$12.60\" got \"%s\"", got);
+
+    /* ...and it comes back with the work. */
+    set_agent(0, "Waveshare", "omp", HERDR_ST_WORKING, true);
+    g_status.gen++;
+    render(20);
+
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "4.5k/s", got, sizeof got),
+           "the panel's rate did not come back: got \"%s\"", got);
 }
 
 /* The stats view: the only place the session figures appear, and now a two-column

@@ -811,6 +811,16 @@ the poll cadence is `CONFIG_HERDR_POLL_PERIOD_MS` + one GET (~250 ms).
 Everything the face does is `lv_anim` + two `lv_timer`s, all in
 `main/ui_companion.c`:
 
+- **The panel's foot** carries two sums over the agents *in the list* — not the bridge's
+  totals, which also count sessions herdr no longer reports: `check_live_rows` asserts the
+  difference, $12.60 of rows against the $12.75 the stats page shows. Bottom-left in
+  `COL_MONEY` is the spend; bottom-right in `COL_RATE` is the summed rate, which only
+  exists in WORKING and only when an agent reports one. Both sit at `(TOTAL_X, TOTAL_Y)` =
+  (6, 169), a few pixels in from the screen's edge and above the bar, and both are hidden
+  when the list is (no agents, no `/stats` answer, or — for the rate — a mood that is not
+  working). They are created last in the mood container so the mood-change rings draw
+  under them, which is why the harness's ring probe stops at y=167 and its wash probe is
+  at y=150 — both bands have to stay clear of the foot.
 - **Each mood carries its own wash** (`.tint` / `.tint_opa` in `s_moods`). The two moods
   that draw no bar — OFFLINE and SLEEP — draw no wash either, so they show the plain
   screen, and the headline is then coloured against the panel that actually results:
