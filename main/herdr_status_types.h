@@ -78,6 +78,7 @@ typedef struct {
     uint32_t messages;
     uint32_t tool_calls;
     uint32_t age_s;      /* seconds since this session's last activity */
+    uint32_t tokens_per_s; /* output tokens per second, as the harness reports it */
     uint32_t cost_micro; /* the provider's own figure, in micro-dollars: 1e6 == $1 */
     char     model[HERDR_MODEL_LEN];
 } herdr_session_t;

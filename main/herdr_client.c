@@ -257,6 +257,7 @@ static bool parse_stats(const char *text, herdr_sessions_t *out, stats_entry_t *
         e->s.messages   = json_u32(a, "messages");
         e->s.tool_calls = json_u32(a, "calls");
         e->s.age_s      = json_u32(a, "age_s");
+        e->s.tokens_per_s = json_u32(a, "tok_s");
         e->s.cost_micro = json_u32(a, "cost_micro");
         strlcpy(e->s.model, model ? model : "", sizeof e->s.model);
         (*n_entries)++;

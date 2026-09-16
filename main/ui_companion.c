@@ -55,7 +55,8 @@ static lv_coord_t s_scr_w, s_scr_h;   /* the screen's size, read once at create 
 #define SCR_H       (s_scr_h)
 #define HEADLINE_Y  10
 #define BODY_CX     (SCR_W / 2)   /* the face is centred on the panel */
-#define BODY_CY     (TINT_H / 2)  /* ...and centred in the tinted one */
+#define BODY_CY     126           /* ~10% below centre: the widget draws its mouth under
+                                     its own centre, so the box sits higher than the art */
 #define BODY_D      100           /* the face's panel: the widget fills whatever it gets */
 #define RIPPLE_D1   (BODY_D + 80) /* the mood-change ring's travel */
 #define PART_TOP0   6             /* ambient motes above the face */
@@ -63,7 +64,7 @@ static lv_coord_t s_scr_w, s_scr_h;   /* the screen's size, read once at create 
 #define PART_LOW0   172           /* ...and below it */
 #define PART_LOW1   186
 #define LIST_X      8
-#define LIST_Y0     190
+#define LIST_Y0     194
 #define LIST_ROW_H  24
 #define LIST_W      (SCR_W - 16)
 #define SUMMARY_Y   300
@@ -290,14 +291,17 @@ static uint8_t   s_page_due;  /* beats left before the list's page lands, 0 = no
  * to be chosen against *that* rather than against the screen: the mood colour where
  * it reads there, and a light one where it does not (SLEEP and OFFLINE are dark
  * enough to vanish into their own tint). */
+#define COL_RATE      0x5CD8FF   /* the tokens/s figure in a row */
+#define COL_MONEY     0xFFC844   /* every $ figure, here and on the stats page */
+
 #define TINT_H        186    /* ~58% of the panel: down to just above the agent list */
 #define TINT_OPA      46     /* "slightly transparent": the screen stays dominant */
 #define TINT_LUMA_GAP 60     /* how much brighter the text must be than the panel */
 
-#define ACT_X         14     /* the activity bar, at the very top */
-#define ACT_Y         6
-#define ACT_W         (SCR_W - 2 * ACT_X)
-#define ACT_H         6
+#define ACT_X         0      /* the activity bar: hard against the top edge, full width */
+#define ACT_Y         0
+#define ACT_W         SCR_W
+#define ACT_H         5
 #define ACT_HL_W      40
 #define MOOD_HEAD_Y   18     /* the headline sits under the bar, not on it: the highlight
                               * would otherwise sweep under the text and wreck its
@@ -1109,7 +1113,7 @@ static void ui_stats_render(void)
     /* The figure worth reading first, so it takes the one accent colour on the page. */
     stats_row(3, STATS_X_LEFT, "spend");
     stats_val(3, "%s", cost);
-    lv_obj_set_style_text_color(s_stats_val[3], lv_color_hex(COL_DONE), 0);
+    lv_obj_set_style_text_color(s_stats_val[3], lv_color_hex(COL_MONEY), 0);
 
     stats_header(4, "AGENTS");
 
@@ -1253,7 +1257,11 @@ static void ui_apply_mood(mood_t mood)
 
     lv_obj_set_style_text_color(s_headline, lv_color_hex(ink), 0);
 
-    /* The activity bar sweeps while there is something to wait for. */
+    /* The activity bar sweeps while there is something to wait for, in the mood's own
+     * colour with a lighter highlight running along it. */
+    lv_obj_set_style_bg_color(s_activity, lv_color_hex(m->body), 0);
+    lv_obj_set_style_bg_color(s_activity_hl, lv_color_lighten(lv_color_hex(m->body), 120), 0);
+
     lv_anim_del(s_activity_hl, anim_activity);
     if (m->busy) {
         lv_obj_clear_flag(s_activity, LV_OBJ_FLAG_HIDDEN);
@@ -1325,19 +1333,23 @@ static void ui_render_list(const herdr_status_t *s)
         const bool       have_sessions = herdr_stats_get(&sess) && sess.valid;
         const int        idx = first + i;
 
-        if (have_sessions && a->state == HERDR_ST_WORKING && s_rate[idx] > 0) {
+        if (have_sessions && a->state == HERDR_ST_WORKING && sess.per[idx].tokens_per_s > 0) {
             char tok[16], rate[24];
 
-            fmt_tokens(tok, sizeof tok, s_rate[idx]);
+            fmt_tokens(tok, sizeof tok, sess.per[idx].tokens_per_s);
             snprintf(rate, sizeof rate, "%s/s", tok);
             lv_label_set_text(s_row_status[i], rate);
+            lv_obj_set_style_text_color(s_row_status[i], lv_color_hex(COL_RATE), 0);
         } else if (have_sessions && a->state == HERDR_ST_IDLE) {
             char cost[16];
 
             fmt_cost(cost, sizeof cost, sess.per[idx].cost_micro);
             lv_label_set_text(s_row_status[i], cost);
+            lv_obj_set_style_text_color(s_row_status[i], lv_color_hex(COL_MONEY), 0);
         } else {
             lv_label_set_text(s_row_status[i], herdr_state_name(a->state));
+            lv_obj_set_style_text_color(s_row_status[i],
+                                        lv_color_hex(s->online ? COL_TEXT : COL_DIM), 0);
         }
 
         lv_obj_set_style_bg_color(s_dot[i], lv_color_hex(state_colour(a->state)), 0);
@@ -1450,51 +1462,23 @@ static void ui_tick(lv_timer_t *timer)
     if (!herdr_client_get(&s)) return;
 
 
-    /* Tokens/s per agent, from the last two /stats fetches. The bridge refreshes
-     * every few seconds, so this averages over that window; a session that has gone
-     * quiet reports zero rather than its last burst. */
+    /* What the rows display, summed: a change here counts as something to redraw (see
+     * the freshness test below), or a working row would keep saying "working" until an
+     * agent's state happened to change. The figures themselves come from /stats as it
+     * reports them — the rate is omp's own, not something computed here. */
     {
         herdr_sessions_t sess = { 0 };
 
         if (herdr_stats_get(&sess) && sess.valid) {
-            const uint32_t now = lv_tick_get();
+            uint32_t sig = 0;
 
             for (int i = 0; i < HERDR_MAX_AGENTS; i++) {
-                const uint32_t out = sess.per[i].tokens_out;
-
-                /* The interval is the one between the totals *changing*, not between
-                 * this tick and the last: /stats refreshes every few seconds while
-                 * ui_tick runs every 200 ms, so dividing by the tick would report the
-                 * whole bridge interval's tokens as a fifth of a second's work. */
-                if (out != s_prev_out[i]) {
-                    if (s_have_prev && out > s_prev_out[i] && s_out_changed_ms[i] != 0) {
-                        const uint32_t dt = now - s_out_changed_ms[i];
-
-                        if (dt > 0) {
-                            s_rate[i] = (uint32_t)(((uint64_t)(out - s_prev_out[i]) * 1000u) / dt);
-                        }
-                    }
-                    s_out_changed_ms[i] = now;
-                }
-
-                if (sess.per[i].age_s > RATE_STALE_S) {
-                    s_rate[i] = 0;   /* nothing is being written: not "busy" now */
-                }
-                s_prev_out[i] = out;
+                sig += sess.per[i].tokens_out + sess.per[i].cost_micro +
+                       sess.per[i].tokens_per_s;
             }
-
-            s_have_prev = true;
+            s_sessions_moved = (sig != s_sessions_sig);
+            s_sessions_sig   = sig;
         }
-
-        /* A cheap signature of what the rows display, so a change in it counts as
-         * something to redraw (see the freshness test below). */
-        uint32_t sig = 0;
-
-        for (int i = 0; i < HERDR_MAX_AGENTS; i++) {
-            sig += sess.per[i].tokens_out + sess.per[i].cost_micro;
-        }
-        s_sessions_moved = (sig != s_sessions_sig);
-        s_sessions_sig   = sig;
     }
 
     const mood_t mood = mood_for(&s);
@@ -1867,10 +1851,6 @@ void ui_companion_create(void)
     /* Deterministic first frame: OFFLINE matches the pre-poll shared state
      * (gen 0, online false), so the first ui_tick that carries data re-renders. */
     s_last_gen = 0;
-    s_have_prev = false;   /* a rebuilt screen starts with no rate history */
-    memset(s_prev_out, 0, sizeof s_prev_out);
-    memset(s_out_changed_ms, 0, sizeof s_out_changed_ms);
-    memset(s_rate, 0, sizeof s_rate);
     s_last_online = false;
     s_last_mood = MOOD_OFFLINE;
     ui_apply_mood(MOOD_OFFLINE);

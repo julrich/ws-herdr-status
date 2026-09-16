@@ -34,7 +34,7 @@
 
 /* portrait (matches ui_layout_init's !split branch) */
 #define BODY_CX 86
-#define BODY_CY 96        /* TINT_H / 2: centred in the mood panel */
+#define BODY_CY 126       /* the face's box centre, as ui_companion.c places it */
 #define BODY_D  120
 #define LIST_Y0 190      /* portrait list geometry, from ui_layout_init() */
 #define LIST_ROW_H 24
@@ -378,6 +378,7 @@ static void load_scenario(const char *name)
             g_sessions.per[i].messages   = live[i].msgs;
             g_sessions.per[i].age_s      = live[i].age;
             g_sessions.per[i].cost_micro = live[i].cost;
+            g_sessions.per[i].tokens_per_s = 85;   /* what the bridge reports */
             snprintf(g_sessions.per[i].model, sizeof g_sessions.per[i].model, "deepseek-v4.1-f");
         }
     }
@@ -774,12 +775,20 @@ static bool band_has_ink(int x0, int x1, int y0, int y1)
  * in this scenario has no motes, which are the other thing that lives down here. */
 static int bright_pixels_below_face(int threshold)
 {
-    int n = 0;
+    /* The strip is inside the mood panel, which is itself bright in this mood's
+     * colour, so the baseline is what the strip looks like without a ring — sampled
+     * at its corner, away from where the washer crosses, and the strip sits between the
+     * face's box (which now ends at ~182) and the agent rows at 194. */
+    const uint32_t base = pixel_at(20, 188);
+    int            n    = 0;
 
-    for(int y = 152; y <= 186; y++) {
+    for(int y = 188; y <= 192; y++) {
         for(int x = 20; x <= 152; x++) {
-            uint32_t c = pixel_at(x, y);
-            int      r = (int)((c >> 16) & 0xFF), g = (int)((c >> 8) & 0xFF), b = (int)(c & 0xFF);
+            const uint32_t c = pixel_at(x, y);
+
+            if(c == base) continue;
+
+            int r = (int)((c >> 16) & 0xFF), g = (int)((c >> 8) & 0xFF), b = (int)(c & 0xFF);
             if(r > threshold || g > threshold || b > threshold) n++;
         }
     }
@@ -1124,25 +1133,23 @@ static void check_live_rows(result_t *r)
     EXPECT(r, assert_text(LIST_Y0 + LIST_ROW_H + 2, LIST_Y0 + LIST_ROW_H + 15, "$5.38", got, sizeof got),
            "the second row (idle) want its spend \"$5.38\", got \"%s\"", got);
 
-    /* The working agent has one sample so far, so it still reads as its state... */
-    EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "working", got, sizeof got),
-           "the first row before a second sample want \"working\", got \"%s\"", got);
-
-    /* ...and then its session writes tokens twice, which is what gives the rate the
-     * interval it needs. */
-    g_sessions.per[0].tokens_out += 6000;
-    g_sessions.per[0].age_s = 1;
-    render(34);
-    g_sessions.per[0].tokens_out += 6000;
-    render(34);
-
+    /* The working agent shows the rate the bridge reports — omp's own figure, not one
+     * computed here — so it is there with the first /stats the device reads. */
     {
         lv_obj_t *scr = lv_screen_active();
+
         EXPECT(r, scr != NULL && assert_text_suffix_in(scr, LIST_Y0 + 2, LIST_Y0 + 15, "/s"),
                "the working row want a token rate (\".../s\"), got \"%s\"", got);
     }
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "working", got, sizeof got) == false,
            "the working row still shows the state word (\"%s\")", got);
+
+    /* ...and it follows the data rather than being set once. */
+    g_sessions.per[0].tokens_per_s = 4321;
+    g_status.gen++;
+    render(20);
+    EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "4.3k/s", got, sizeof got),
+           "the working row did not follow /stats to \"4.3k/s\", got \"%s\"", got);
 }
 
 /* The stats view: the only place the session figures appear, and now a two-column
