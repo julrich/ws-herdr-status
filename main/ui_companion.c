@@ -223,7 +223,7 @@ static const mood_cfg_t s_moods[MOOD_N] = {
                        .party = true },
     [MOOD_IDLE]    = { .bar = true, .body = COL_IDLE, .headline = "IDLE",
                        .face = MOOD_FACE_NEUTRAL,      .reaction = MOOD_FACE_SMIRK },
-    [MOOD_SLEEP]   = { .bar = true, .body = COL_SLEEP, .headline = "NO AGENTS",
+    [MOOD_SLEEP]   = { .body = COL_SLEEP, .headline = "NO AGENTS", .bar = false,
                        .face = MOOD_FACE_SLEEPY,       .reaction = MOOD_FACE_SLEEPY,
                        .mote_ms = 3200, .mote_opa = 110, .mote_rise = 26 },
     [MOOD_OFFLINE] = { .body = COL_OFFLINE, .headline = "OFFLINE", .bar = false,
@@ -1264,17 +1264,19 @@ static void ui_apply_mood(mood_t mood)
 
     lv_obj_set_style_text_color(s_headline, lv_color_hex(ink), 0);
 
-    /* The bar between the panel and the list is always there — it doubles as that
-     * boundary — and only *sweeps* while there is something to wait for: the track
-     * keeps the divider's colour, and the highlight that runs along it takes the
-     * mood's, so a quiet screen shows a plain line and a busy one moves. */
+    /* The bar between the panel and the list doubles as that boundary, so it is drawn
+     * for every mood that has something to put behind it — and only *sweeps* while
+     * there is something to wait for: the track keeps the divider's colour and the
+     * highlight that runs along it takes the mood's, so a quiet screen shows a plain
+     * line and a busy one moves. Two moods draw nothing: OFFLINE, where the link is
+     * already the message, and SLEEP, where there are no agents for a bar to be about. */
     lv_obj_set_style_bg_color(s_activity, lv_color_hex(COL_DIM), 0);
     lv_obj_set_style_bg_color(s_activity_hl, lv_color_hex(m->body), 0);
 
     lv_anim_del(s_activity_hl, anim_activity);
 
     if (!m->bar) {
-        /* OFFLINE: nothing to show progress on, and the link is already the message. */
+        /* OFFLINE or SLEEP: nothing to show progress on — see ui_apply_mood. */
         lv_obj_add_flag(s_activity, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_activity_hl, LV_OBJ_FLAG_HIDDEN);
     } else {

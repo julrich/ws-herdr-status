@@ -37,6 +37,8 @@
 #define BODY_CY 108       /* the face's box centre, as ui_companion.c places it */
 #define BODY_D  120
 #define LIST_Y0 190      /* portrait list geometry, from ui_layout_init() */
+#define BAR_Y   186      /* the divider between the panel and the list (TINT_H) */
+#define BAR_H   5
 #define LIST_ROW_H 24
 #define RING_D  138
 #define MOUTH_CY 126
@@ -61,6 +63,7 @@ static int g_h = 320;
 #define COL_OFFLINE 0x2A3442
 /* The face's own features (eyes, mouth, flat mouth) are painted in the screen
  * background colour, so they read as holes cut in the face disc. */
+#define COL_DIM     0x6F7D90
 #define COL_BG      0x0B0F14
 #define COL_FACE    0x0B0F14
 
@@ -831,6 +834,21 @@ static int count_exact(uint32_t rgb888, int x0, int x1, int y0, int y1)
     return n;
 }
 
+/* The divider between the panel and the list. It is drawn as a solid track in the dim
+ * colour, so "drawn" is a pixel count and "not drawn" is none at all — an absence no
+ * blend of the burst's ripples can fake, since those never land on an exact colour. */
+static bool assert_bar(bool want, char *why, size_t why_sz)
+{
+    /* The middle three rows of the track: clear of the list's first row below it. */
+    const int n = count_exact(COL_DIM, 0, g_w - 1, BAR_Y + 1, BAR_Y + BAR_H - 2);
+
+    if((n > 0) != want) {
+        snprintf(why, why_sz, "the divider is %s (%d track px)", n > 0 ? "drawn" : "missing", n);
+        return false;
+    }
+    return true;
+}
+
 /* Pixels leaning warm by at least delta on the red channel (cheek blush). */
 static int count_warmer(int x0, int x1, int y0, int y1, int delta)
 {
@@ -966,6 +984,12 @@ static void check_working(result_t *r)
     }
     EXPECT(r, assert_text(HEADLINE_Y_MIN, HEADLINE_Y_MAX, "WORKING", got, sizeof got),
            "headline want \"WORKING\" got \"%s\"", got);
+
+    /* An agent is running, so the divider between the panel and the list is drawn. */
+    {
+        char why[64];
+        EXPECT(r, assert_bar(true, why, sizeof why), "%s", why);
+    }
 }
 
 static void check_done(result_t *r)
@@ -1004,6 +1028,14 @@ static void check_empty(result_t *r)
            "headline want \"NO AGENTS\" got \"%s\"", got);
     EXPECT(r, assert_text(SUMMARY_Y_MIN, SUMMARY_Y_MAX, "no agents", got, sizeof got),
            "summary want \"no agents\" got \"%s\"", got);
+
+    /* No agents means nothing for a bar to be about, so the divider goes with them. The
+     * burst the mood change started has to be over first: its ripples cross this strip. */
+    render(20);
+    {
+        char why[64];
+        EXPECT(r, assert_bar(false, why, sizeof why), "%s", why);
+    }
 }
 
 static void check_offline(result_t *r)
@@ -1018,6 +1050,12 @@ static void check_offline(result_t *r)
            "headline want \"OFFLINE\" got \"%s\"", got);
     EXPECT(r, assert_text(SUMMARY_Y_MIN, SUMMARY_Y_MAX, "no link", got, sizeof got),
            "summary want \"no link\" got \"%s\"", got);
+
+    render(20);   /* past the mood-change burst, for the reason in check_empty */
+    {
+        char why[64];
+        EXPECT(r, assert_bar(false, why, sizeof why), "%s", why);
+    }
 }
 
 /* Six agents, four rows. The summary used to tack a "+2" on; paging reports the
