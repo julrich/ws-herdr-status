@@ -55,8 +55,9 @@ static lv_coord_t s_scr_w, s_scr_h;   /* the screen's size, read once at create 
 #define SCR_H       (s_scr_h)
 #define HEADLINE_Y  10
 #define BODY_CX     (SCR_W / 2)   /* the face is centred on the panel */
-#define BODY_CY     126           /* ~10% below centre: the widget draws its mouth under
-                                     its own centre, so the box sits higher than the art */
+#define BODY_CY     111           /* ~5% below the panel's centre: the widget draws its
+                                     mouth under its own centre, so the box sits a little
+                                     higher than the art looks */
 #define BODY_D      100           /* the face's panel: the widget fills whatever it gets */
 #define RIPPLE_D1   (BODY_D + 80) /* the mood-change ring's travel */
 #define PART_TOP0   6             /* ambient motes above the face */
@@ -298,8 +299,9 @@ static uint8_t   s_page_due;  /* beats left before the list's page lands, 0 = no
 #define TINT_OPA      46     /* "slightly transparent": the screen stays dominant */
 #define TINT_LUMA_GAP 60     /* how much brighter the text must be than the panel */
 
-#define ACT_X         0      /* the activity bar: hard against the top edge, full width */
-#define ACT_Y         0
+#define ACT_X         0      /* the activity bar: full width, docked between the mood
+                              * panel and the agent list */
+#define ACT_Y         TINT_H
 #define ACT_W         SCR_W
 #define ACT_H         5
 #define ACT_HL_W      40

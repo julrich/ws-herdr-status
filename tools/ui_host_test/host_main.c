@@ -34,7 +34,7 @@
 
 /* portrait (matches ui_layout_init's !split branch) */
 #define BODY_CX 86
-#define BODY_CY 126       /* the face's box centre, as ui_companion.c places it */
+#define BODY_CY 111       /* the face's box centre, as ui_companion.c places it */
 #define BODY_D  120
 #define LIST_Y0 190      /* portrait list geometry, from ui_layout_init() */
 #define LIST_ROW_H 24
@@ -777,12 +777,12 @@ static int bright_pixels_below_face(int threshold)
 {
     /* The strip is inside the mood panel, which is itself bright in this mood's
      * colour, so the baseline is what the strip looks like without a ring — sampled
-     * at its corner, away from where the washer crosses, and the strip sits between the
-     * face's box (which now ends at ~182) and the agent rows at 194. */
-    const uint32_t base = pixel_at(20, 188);
+     * at its corner, away from where the washer crosses: the strip sits between the
+     * face's box (which ends at ~161) and the activity bar at 186. */
+    const uint32_t base = pixel_at(20, 164);
     int            n    = 0;
 
-    for(int y = 188; y <= 192; y++) {
+    for(int y = 164; y <= 180; y++) {
         for(int x = 20; x <= 152; x++) {
             const uint32_t c = pixel_at(x, y);
 
