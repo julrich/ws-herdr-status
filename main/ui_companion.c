@@ -777,6 +777,11 @@ void ui_companion_on_page(int dir)
         return;
     }
 
+    if (!s.online) {
+        return;   /* the list is empty while the link is down, so there is no next
+                   * page to reach: paging would only move an index nobody can see */
+    }
+
     const int pages = (s.count + UI_ROWS - 1) / UI_ROWS;
     if (pages <= 1) {
         return; /* everything already fits */
@@ -1167,6 +1172,13 @@ static void ui_apply_mood(mood_t mood)
     const mood_cfg_t *m = &s_moods[mood];
     s_mood = mood;
 
+    if (mood == MOOD_OFFLINE) {
+        /* The list is cleared while the link is down (ui_render_list), so its page
+         * index goes with it: coming back to page two of a list nobody could see is
+         * worse than coming back to its first page. */
+        s_page = 0;
+    }
+
     lv_label_set_text(s_headline, m->headline);
 
     /* The panel takes the mood's colour, and the headline is chosen against what the
@@ -1238,6 +1250,17 @@ static uint32_t state_colour(herdr_agent_state_t st)
 
 static void ui_render_list(const herdr_status_t *s)
 {
+    /* Offline, the list is a memory: whatever was running when the link dropped is
+     * not something the device can still vouch for, and a stale "working" is worse
+     * than a blank. The headline and the summary already say why it is empty, so
+     * every row goes, dot and all. */
+    if (!s->online) {
+        for (int i = 0; i < UI_ROWS; i++) {
+            lv_obj_add_flag(s_row[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+
     /* s_page selects which slice of the list is on screen; the rows themselves
      * never move, so the layout stays identical from page to page. */
     const int first = s_page * UI_ROWS;

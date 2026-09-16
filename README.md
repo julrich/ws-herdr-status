@@ -101,7 +101,11 @@ suppresses the click, so a swipe that fell short did nothing at all (AGENTS.md Â
 | DONE | green, confetti burst | an agent finished |
 | IDLE | pale, blushing | agents online, nothing happening |
 | SLEEP | dark, `z`s drifting | no agents running |
-| OFFLINE | grey, dimmed list | the bridge or the network is unreachable |
+| OFFLINE | grey, empty list | the bridge or the network is unreachable |
+
+The agent list is cleared while the link is down: the agents the last poll reported are
+not something the device can still vouch for, and a stale "working" is worse than a
+blank. They come back with the link, on the first page.
 
 ## Configuration
 

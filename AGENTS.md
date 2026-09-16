@@ -708,6 +708,14 @@ is ever wanted again, two things measured while it was:
   in the layout `ui_layout_init` sets out: the face occupies the top half and the
   list the bottom, so "the face's half" is always the top one. There is no other
   orientation — see "Orientation: there isn't one".
+- **The list is cleared when the link is down.** Every row (dot, label and figure) is
+  hidden while `!online`, because what the last poll reported is not something the
+  device can still vouch for and a stale "working" is worse than a blank; the headline
+  and the summary already say why the screen is empty. Paging is refused with it, and
+  the page index resets on the mood change to OFFLINE so the list comes back on its
+  first page. `check_offline` asserts both halves of that — absent while offline, back
+  once the link is restored — so it stays a render's decision rather than a one-way
+  clearing of the data the poller keeps.
 - The **face's tap is immediate** — it is the one that wants feedback, and its double
   (the view switch) is orthogonal, so both may happen on a double. The **list's tap
   pages on the tap itself**: the three-beat delay it used to carry existed only so a

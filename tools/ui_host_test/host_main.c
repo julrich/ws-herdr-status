@@ -1051,6 +1051,23 @@ static void check_offline(result_t *r)
         char why[64];
         EXPECT(r, assert_bar(false, why, sizeof why), "%s", why);
     }
+
+    /* The list is cleared while the link is down: whatever the last poll reported is
+     * not something the device can still vouch for, and a stale "working" is worse than
+     * a blank. The label and its dot both go. */
+    EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "> PoC", got, sizeof got) == false,
+           "an offline list still shows \"%s\"", got);
+    EXPECT(r, count_above_bg(0, g_w - 1, LIST_Y0, LIST_Y0 + LIST_ROW_H - 1, 24) == 0,
+           "an offline list still draws %d pixels in its first row",
+           count_above_bg(0, g_w - 1, LIST_Y0, LIST_Y0 + LIST_ROW_H - 1, 24));
+
+    /* ...and it comes back with the link, because this is the render's doing and not a
+     * one-way clearing of the data. */
+    g_status.online = true;
+    g_status.gen++;
+    render(20);
+    EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "> PoC", got, sizeof got),
+           "the list did not come back with the link: got \"%s\"", got);
 }
 
 /* Six agents, four rows. The summary used to tack a "+2" on; paging reports the
