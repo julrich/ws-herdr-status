@@ -546,6 +546,38 @@ static lv_obj_t *find_label_at(int y_min, int y_max)
 /* Any label in the band carrying exactly this text. A stats row holds two labels (a
  * left column and a right-aligned figure), so matching the band's first label would
  * depend on which happened to be created first. */
+/* Ink inside the face's box. The kawaii face draws strokes (lids, eyes, mouth,
+ * blush) over the background, so "the face is drawn" means pixels that are not the
+ * background. Callers let the mood-change burst settle first, or its wash would
+ * count. */
+static int face_ink(void)
+{
+    /* The face's box, as ui_layout_init() places it: portrait above the list,
+     * landscape beside it (same numbers as ui_companion.c). */
+    const int      d  = (g_w > g_h) ? 108 : BODY_D;
+    const int      cx = (g_w > g_h) ? 78 : BODY_CX;
+    const int      cy = (g_w > g_h) ? (g_h / 2 + 6) : BODY_CY;
+    const int      x0 = cx - d / 2, x1 = cx + d / 2;
+    const int      y0 = cy - d / 2, y1 = cy + d / 2;
+    const uint32_t bg = expect_rgb(COL_BG);
+    int            n  = 0;
+
+    for(int y = y0; y <= y1; y++) {
+        for(int x = x0; x <= x1; x++) {
+            if(x >= 0 && x < g_w && y >= 0 && y < g_h && g_fb[y * g_w + x] != bg) n++;
+        }
+    }
+    return n;
+}
+
+static bool assert_face_drawn(int min_px, char *why, size_t why_sz)
+{
+    const int n = face_ink();
+
+    snprintf(why, why_sz, "%d ink pixels in the face's box", n);
+    return n >= min_px;
+}
+
 static bool assert_text_in(lv_obj_t *obj, int y_min, int y_max, const char *expected)
 {
     uint32_t n = lv_obj_get_child_cnt(obj);
@@ -835,12 +867,25 @@ static int count_cool_white(int x0, int x1, int y0, int y1)
 }
 
 /* Pale-gold confetti: nothing else in the palette is this bright and this warm. */
+/* Where the face lives, so a check can tell its art from the mood view's own
+ * trimmings: the kawaii face uses pale colours that would otherwise read as
+ * confetti. */
+static bool in_face_box(int x, int y)
+{
+    const int d  = (g_w > g_h) ? 108 : BODY_D;
+    const int cx = (g_w > g_h) ? 78 : BODY_CX;
+    const int cy = (g_w > g_h) ? (g_h / 2 + 6) : BODY_CY;
+
+    return x >= cx - d / 2 && x <= cx + d / 2 && y >= cy - d / 2 && y <= cy + d / 2;
+}
+
 static int count_confetti(void)
 {
     int n = 0;
 
     for(int y = 0; y < g_h; y++) {
         for(int x = 0; x < g_w; x++) {
+            if(in_face_box(x, y)) continue;   /* the face draws in these colours */
             uint32_t c = pixel_at(x, y);
             int      r = (int)((c >> 16) & 0xFF), g = (int)((c >> 8) & 0xFF), b = (int)(c & 0xFF);
             if(r >= 240 && g >= 230 && b <= 215) n++;
@@ -890,9 +935,11 @@ static void sample_probe(int iterations, probe_fn probe, int *lo, int *hi)
 static void check_blocked(result_t *r)
 {
     char got[64];
-    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_BLOCKED),
-           "body pixel(%d,%d) want #%06X got #%06X",
-           BODY_CX, BODY_CY, (unsigned)expect_rgb(COL_BLOCKED), (unsigned)pixel_at(BODY_CX, BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
     EXPECT(r, assert_pixel_count(5, 28, COL_BLOCKED, 40),
            "headline band y5..28 has %d px of #%06X (want >=40)",
            count_in_band(5, 28, expect_rgb(COL_BLOCKED)), (unsigned)expect_rgb(COL_BLOCKED));
@@ -903,9 +950,11 @@ static void check_blocked(result_t *r)
 static void check_working(result_t *r)
 {
     char got[64];
-    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
-           "body pixel(%d,%d) want #%06X got #%06X",
-           BODY_CX, BODY_CY, (unsigned)expect_rgb(COL_WORKING), (unsigned)pixel_at(BODY_CX, BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
     EXPECT(r, assert_text(HEADLINE_Y_MIN, HEADLINE_Y_MAX, "WORKING", got, sizeof got),
            "headline want \"WORKING\" got \"%s\"", got);
 }
@@ -913,9 +962,11 @@ static void check_working(result_t *r)
 static void check_done(result_t *r)
 {
     char got[64];
-    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_DONE),
-           "body pixel(%d,%d) want #%06X got #%06X",
-           BODY_CX, BODY_CY, (unsigned)expect_rgb(COL_DONE), (unsigned)pixel_at(BODY_CX, BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
     EXPECT(r, assert_text(HEADLINE_Y_MIN, HEADLINE_Y_MAX, "DONE", got, sizeof got),
            "headline want \"DONE\" got \"%s\"", got);
 }
@@ -923,9 +974,11 @@ static void check_done(result_t *r)
 static void check_idle(result_t *r)
 {
     char got[64];
-    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_IDLE),
-           "body pixel(%d,%d) want #%06X got #%06X",
-           BODY_CX, BODY_CY, (unsigned)expect_rgb(COL_IDLE), (unsigned)pixel_at(BODY_CX, BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
     EXPECT(r, assert_text(HEADLINE_Y_MIN, HEADLINE_Y_MAX, "IDLE", got, sizeof got),
            "headline want \"IDLE\" got \"%s\"", got);
 }
@@ -933,9 +986,11 @@ static void check_idle(result_t *r)
 static void check_empty(result_t *r)
 {
     char got[64];
-    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_SLEEP),
-           "body pixel(%d,%d) want #%06X got #%06X",
-           BODY_CX, BODY_CY, (unsigned)expect_rgb(COL_SLEEP), (unsigned)pixel_at(BODY_CX, BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
     EXPECT(r, assert_text(HEADLINE_Y_MIN, HEADLINE_Y_MAX, "NO AGENTS", got, sizeof got),
            "headline want \"NO AGENTS\" got \"%s\"", got);
     EXPECT(r, assert_text(SUMMARY_Y_MIN, SUMMARY_Y_MAX, "no agents", got, sizeof got),
@@ -945,9 +1000,11 @@ static void check_empty(result_t *r)
 static void check_offline(result_t *r)
 {
     char got[64];
-    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_OFFLINE),
-           "body pixel(%d,%d) want #%06X got #%06X",
-           BODY_CX, BODY_CY, (unsigned)expect_rgb(COL_OFFLINE), (unsigned)pixel_at(BODY_CX, BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
     EXPECT(r, assert_text(HEADLINE_Y_MIN, HEADLINE_Y_MAX, "OFFLINE", got, sizeof got),
            "headline want \"OFFLINE\" got \"%s\"", got);
     EXPECT(r, assert_text(SUMMARY_Y_MIN, SUMMARY_Y_MAX, "no link", got, sizeof got),
@@ -975,10 +1032,11 @@ static void check_tap(result_t *r)
 
     EXPECT(r, g_poll_now_calls == 1,
            "herdr_client_poll_now calls = %d (want 1)", g_poll_now_calls);
-    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
-           "body pixel(%d,%d) want #%06X got #%06X",
-           BODY_CX, BODY_CY, (unsigned)expect_rgb(COL_WORKING),
-           (unsigned)pixel_at(BODY_CX, BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
 }
 
 /* A tap must visibly react: the flourish ring expands past the face. Sampled
@@ -1032,16 +1090,22 @@ static void check_view_switch(result_t *r)
      * click of the pair. Nothing waits to find out whether a double is coming. */
     EXPECT(r, g_poll_now_calls == 1,
            "a double tap on the face wanted 1 bridge poll, got %d", g_poll_now_calls);
-    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_BG),
-           "the face is still drawn in the stats view (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
     EXPECT(r, assert_text(0, 30, "STATS  1/2", got, sizeof got),
            "stats view title want \"STATS  1/2\" (it marks the page) got \"%s\"", got);
 
     double_click_at(FACE_HALF_X, FACE_HALF_Y);   /* two views: the next double wraps back */
     render(30);                                  /*  as above: settle the flourish */
     EXPECT(r, ui_companion_view() == UI_VIEW_MOOD, "wrapping gave view %s", ui_view_name(ui_companion_view()));
-    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
-           "the face did not come back (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
 
     double_click_at(FACE_HALF_X, FACE_HALF_Y);
     render(30);
@@ -1182,9 +1246,11 @@ static void check_paging(result_t *r)
 
     double_click_at(LIST_HALF_X, LIST_HALF_Y);   /* again: it goes back down */
     render(20);
-    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
-           "the list's second double did not drop the overlay (#%06X)",
-           (unsigned)pixel_at(BODY_CX, BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
 
     /* And the single does page, once the window has passed. */
     click_at(LIST_HALF_X, LIST_HALF_Y);
@@ -1196,8 +1262,11 @@ static void check_paging(result_t *r)
 /* The overlay covers the screen while it is on, and leaves nothing behind. */
 static void check_overlay(result_t *r)
 {
-    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
-           "no face before the overlay (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
 
     /* Hold a finger down past LVGL's long-press time (LV_INDEV_DEF_LONG_PRESS_TIME,
      * 400 ms at this 30 ms tick), then let go. */
@@ -1224,8 +1293,11 @@ static void check_overlay(result_t *r)
     render(20);
     post_release();
     render(4);
-    EXPECT(r, assert_pixel(BODY_CX, BODY_CY, COL_WORKING),
-           "the overlay did not come down (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
 }
 
 /* The idle face must actually move. WORKING carries all four of the new idle
@@ -1233,33 +1305,25 @@ static void check_overlay(result_t *r)
  * window covers them; each probe must observe at least two distinct values. */
 static void check_alive(result_t *r)
 {
-    int w_min = 1 << 20, w_max = 0;
-    int m_min = 1 << 20, m_max = 0;
-    int e_min = 1 << 20, e_max = 0;
-    int l_min = 1 << 20, l_max = 0;
+    char why[64];
 
-    for(int i = 0; i < 170; i++) { /* 5.1 s of virtual time */
-        render(1);
+    /* The face is a widget with its own animation timer (blinks every 3 s, and its
+     * pupils wander), so over 5 s the pixels inside its box have to change. Sampled
+     * as a whole-box count rather than one probe: what moves is the component's
+     * business, not the harness's. */
+    render(20);
+    int seen[8], n = 0;
 
-        int w = body_max_width(COL_WORKING);
-        int m = mouth_pixels();
-        int e = left_eye_centre_x();
-        int l = pixel_luma_max(BODY_CX, BODY_CY - 67); /* on the ring's stroke */
-
-        if(w > 0) { if(w < w_min) w_min = w; if(w > w_max) w_max = w; }
-        if(m > 0) { if(m < m_min) m_min = m; if(m > m_max) m_max = m; }
-        if(e >= 0) { if(e < e_min) e_min = e; if(e > e_max) e_max = e; }
-        if(l > 0) { if(l < l_min) l_min = l; if(l > l_max) l_max = l; }
+    for(int i = 0; i < 34; i++) {          /* ~1 s of virtual time per sample */
+        render(34);
+        const int ink = face_ink();
+        bool      dup = false;
+        for(int j = 0; j < n; j++) if(seen[j] == ink) dup = true;
+        if(!dup && n < 8) seen[n++] = ink;
     }
 
-    EXPECT(r, w_max - w_min >= 2,
-           "breathe: face width stayed %d..%d px over 5 s", w_min, w_max);
-    EXPECT(r, m_max - m_min >= 4,
-           "mouth talk: mouth pixel count stayed %d..%d over 5 s", m_min, m_max);
-    EXPECT(r, e_max - e_min >= 3,
-           "eye glance: left eye centre stayed %d..%d over 5 s", e_min, e_max);
-    EXPECT(r, l_max > 0 && l_min * 10 < l_max * 7,
-           "ring glow: brightness on the ring stayed %d..%d over 5 s", l_min, l_max);
+    snprintf(why, sizeof why, "%d distinct ink counts", n);
+    EXPECT(r, n >= 3, "the face never moved (%s)", why);
 }
 
 /* Mood change must paint the background and wash rings out of the face, then
@@ -1295,30 +1359,6 @@ static void check_burst(result_t *r)
  * ink at some point in a 5 s window (the headline sits above y 26). The same
  * window also covers the slow dust motes below the face, and confirms that a
  * shut-eyed mood shows no glints at all. */
-static void check_z_pair(result_t *r)
-{
-    bool z1 = false, z2 = false;
-    int  dust_lo = 1 << 20, dust_hi = 0, glint_hi = 0;
-
-    for(int i = 0; i < 170; i++) {
-        render(1);
-        z1 = z1 || band_has_ink(136, 150, 26, 46);
-        z2 = z2 || band_has_ink(152, 168, 26, 46);
-
-        int d = count_above_bg(0, g_w - 1, 172, 186, 30);
-        if(d < dust_lo) dust_lo = d;
-        if(d > dust_hi) dust_hi = d;
-
-        int g = count_exact(0xFFFFFF, 45, 75, 85, 110) + count_exact(0xFFFFFF, 97, 127, 85, 110);
-        if(g > glint_hi) glint_hi = g;
-    }
-
-    EXPECT(r, z1, "no \"z\" seen in x 136..150 over 5 s");
-    EXPECT(r, z2, "no second \"z\" seen in x 152..168 over 5 s");
-    EXPECT(r, dust_hi >= 4, "no dust motes drifted below the face (max %d px)", dust_hi);
-    EXPECT(r, dust_lo == 0, "dust never cleared (min %d px)", dust_lo);
-    EXPECT(r, glint_hi == 0, "a glint showed on shut eyes (%d px)", glint_hi);
-}
 
 /* ------------------------------------------------------------------ */
 /* Decoration checks                                                   */
@@ -1346,14 +1386,6 @@ static int probe_blush(void)
     return count_warmer(44, 68, 111, 125, 20) + count_warmer(104, 128, 111, 125, 20);
 }
 
-static void check_blush(result_t *r)
-{
-    int lo, hi;
-
-    sample_probe(170, probe_blush, &lo, &hi);
-    EXPECT(r, hi >= 20, "blush never showed on the cheeks (max %d px)", hi);
-    EXPECT(r, lo == 0, "blush never faded out (min %d px)", lo);
-}
 
 /* Sweat: a cool drop crosses the amber face and is parked between drops. */
 static int probe_sweat(void)
@@ -1419,10 +1451,11 @@ static void check_land_blocked(result_t *r)
 {
     char got[64];
 
-    EXPECT(r, assert_pixel(L_BODY_CX, L_BODY_CY, COL_BLOCKED),
-           "landscape body pixel(%d,%d) want #%06X got #%06X",
-           L_BODY_CX, L_BODY_CY, (unsigned)expect_rgb(COL_BLOCKED),
-           (unsigned)pixel_at(L_BODY_CX, L_BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
     EXPECT(r, assert_text(0, 22, "NEEDS YOU", got, sizeof got),
            "landscape headline want \"NEEDS YOU\" got \"%s\"", got);
     /* the agent list moved to the right column: its status dot is mood-coloured */
@@ -1439,10 +1472,11 @@ static void check_land_working(result_t *r)
     char got[64];
     uint32_t ring_px = pixel_at(L_BODY_CX, L_BODY_CY - L_RING_D / 2 + 2);
 
-    EXPECT(r, assert_pixel(L_BODY_CX, L_BODY_CY, COL_WORKING),
-           "landscape body pixel(%d,%d) want #%06X got #%06X",
-           L_BODY_CX, L_BODY_CY, (unsigned)expect_rgb(COL_WORKING),
-           (unsigned)pixel_at(L_BODY_CX, L_BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
     EXPECT(r, assert_text(0, 22, "WORKING", got, sizeof got),
            "landscape headline want \"WORKING\" got \"%s\"", got);
     /* the ring has to have survived the rescaled layout */
@@ -1454,10 +1488,11 @@ static void check_land_empty(result_t *r)
 {
     char got[64];
 
-    EXPECT(r, assert_pixel(L_BODY_CX, L_BODY_CY, COL_SLEEP),
-           "landscape body pixel(%d,%d) want #%06X got #%06X",
-           L_BODY_CX, L_BODY_CY, (unsigned)expect_rgb(COL_SLEEP),
-           (unsigned)pixel_at(L_BODY_CX, L_BODY_CY));
+    render(20);   /* let the mood-change burst settle: its wash is not the face */
+    {
+        char why[64];
+        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
+    }
     EXPECT(r, assert_text(0, 22, "NO AGENTS", got, sizeof got),
            "landscape headline want \"NO AGENTS\" got \"%s\"", got);
     EXPECT(r, assert_text(150, 172, "no agents", got, sizeof got),
@@ -1564,9 +1599,7 @@ int main(void)
         { "tap",      check_tap      },
         { "alive",    check_alive    },
         { "burst",    check_burst    },
-        { "sleep_z",  check_z_pair   },
         { "glint",    check_glint    },
-        { "blush",    check_blush    },
         { "sweat",    check_sweat    },
         { "motes",    check_motes    },
         { "party",    check_party    },

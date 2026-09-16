@@ -465,28 +465,32 @@ other layouts. **[unverified for rotations other than 0]**
 5. **The FPS log mode is LVGL 9 only.** `LV_USE_PERF_MONITOR_LOG_MODE` prints to the
    log instead of drawing an overlay; LVGL 8.4 had `LV_USE_PERF_MONITOR` but no log
    mode (`lv_refr_get_fps_avg()` came with the on-screen label).
-6. **The harness must hold a scripted press across an indev read.** LVGL 9 gives
+6. **A canvas's transparency is its *format*, not its `bg_opa`.** Setting
+   `bg_opa` to `LV_OPA_TRANSP` on an LVGL 9 canvas leaves its pixels opaque, so a
+   face drawn into an RGB565 canvas over the UI arrives as a white box. The mood
+   face's canvases are `LV_COLOR_FORMAT_ARGB8888` and filled transparent (§11).
+7. **The harness must hold a scripted press across an indev read.** LVGL 9 gives
    every indev its own read timer (measured at ~60 ms here) instead of reading at
    each `lv_timer_handler()` as v8 did, so a press held for a single 30 ms tick is
    seen only by luck: `click_at()` holds for three ticks and then releases. The same
    change is why the flush's pixels are native RGB565 while `lv_color_t` is RGB888 —
    `widen565()` in `tools/ui_host_test/host_main.c` does that widening for both the
    flush and the expectations, so the two can never disagree.
-7. **`UI_LOGI` prints on the host.** With no ESP-IDF it goes to stderr with the tag,
+8. **`UI_LOGI` prints on the host.** With no ESP-IDF it goes to stderr with the tag,
    so a failing scenario can say *why* a click did nothing — which is how the two
    LVGL 9 click bugs above were found.
-8. **Bundled fonts are ASCII-only.** `lv_font_montserrat_*` cover 0x20–0x7F. A
+9. **Bundled fonts are ASCII-only.** `lv_font_montserrat_*` cover 0x20–0x7F. A
    `·`/`°`/emoji in a label renders as a missing glyph. Measure text before
    trusting it to fit — advances are in `lv_font_montserrat_N.c` (`.adv_w` in
    1/16 px, glyph id = `codepoint - 31`).
-9. **`idf_monitor` compares the device's ELF SHA256 against ELFs in the cwd.**
+10. **`idf_monitor` compares the device's ELF SHA256 against ELFs in the cwd.**
    Running `monitor` from the wrong directory produces a bogus
    "Checksum mismatch between flashed and built applications". Launch it from the
    project whose binary you actually flashed.
-10. **Benign boot warning**, ignore it:
+11. **Benign boot warning**, ignore it:
    `W JD9853: The 3Ah command has been used and will be overwritten by external
    initialization sequence` — the vendor init table sets 3Ah twice.
-11. **Flashing erases the factory firmware.** It is recoverable from the demo zip
+12. **Flashing erases the factory firmware.** It is recoverable from the demo zip
    (`ESP-IDF/01_factory`).
 
 ---
@@ -781,7 +785,27 @@ Two halves, no USB link needed after flashing:
   against 116 ms for a re-parse of the largest session). There is no second
   harness on this machine; `π` is omp's own title glyph. `~/.omp/stats.db` is
   pre-aggregated but only as fresh as the last `omp stats` run, so it is not used.
-- `main/ui_companion.c`, `main/touch_gesture.c` and `main/ui_stats.h` stay free of
+- **The face is 0015/lvgl_kawaii_face (MIT), vendored in
+  `components/lvgl_kawaii_face/` and reached through `main/mood_face.c`.** The mood
+  table hands it an expression (and a reaction that plays on the change before the
+  resting expression returns, counted in `ui_tick` beats). It is the reason this
+  project is on LVGL 9 (§6) and it replaces everything the blob used to draw for a
+  face — eyes, glints, blush, mouth, sweat, alert marker, "z"s, ring. The ambient
+  particles and the mood-change burst are ours and stay.
+- **Three vendoring fixes** were needed, each marked in the source: a missing
+  `<string.h>` (the ESP headers used to pull it in), canvases in
+  `LV_COLOR_FORMAT_ARGB8888` sized for `lv_color32_t` and filled transparent instead
+  of white (LVGL 9 draws a themed background on a canvas, so an RGB565 face arrived
+  as three white boxes over this UI), and `clear_flags(SCROLLABLE | CLICKABLE)` on
+  its container and canvases (they cover the screen and would otherwise swallow every
+  tap). Its CMake also linked the port by component name, which is
+  `lvgl_port_lib` — it links the target instead.
+- **The adapter is the boundary**: `ui_companion.c` includes `mood_face.h` (LVGL
+  only, per the rule below) and never `lvgl_kawaii_face.h`, which needs `esp_err.h`.
+  The host harness compiles the *real* component anyway, through four shims in
+  `tools/ui_host_test/esp_shim/`, so the face the harness renders is the face the
+  panel shows.
+- `main/ui_companion.c` and `main/ui_stats.h` stay free of
   esp_* includes; the diagnostics getters declared in `ui_stats.h` are esp-side
   (`herdr_client.c`, `ui_rotation.c`, `ui_input.c`, `ui_device.c`) and the host
   harness stubs them, exactly as it stubs `herdr_client_get()`.
