@@ -134,7 +134,17 @@ static esp_err_t lvgl_start(void)
     /* The port's own pointer indev is the whole input path: this panel reports a
      * single touch, so LVGL's click / long-press / gesture events cover the
      * companion's vocabulary (AGENTS.md §11). */
-    ESP_RETURN_ON_FALSE(lvgl_port_add_touch(&touch_cfg) != NULL, ESP_FAIL, TAG, "lvgl_port_add_touch failed");
+    lv_indev_t *indev = lvgl_port_add_touch(&touch_cfg);
+    ESP_RETURN_ON_FALSE(indev != NULL, ESP_FAIL, TAG, "lvgl_port_add_touch failed");
+
+    /* Two thresholds tuned for a finger rather than a mouse. LVGL classifies a
+     * double click itself, but only when the two taps fall within scroll_limit of
+     * each other — 10 px by default, which a thumb on a 172 px panel rarely manages,
+     * so the double never registered on the device. Nothing here scrolls, so the
+     * limit costs nothing. The window for the pair is long_press_time, which 600 ms
+     * makes comfortable without holding up a long press. */
+    lv_indev_set_scroll_limit(indev, 40);
+    lv_indev_set_long_press_time(indev, 600);
 
     return ESP_OK;
 }

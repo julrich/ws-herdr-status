@@ -706,6 +706,13 @@ is ever wanted again, two things measured while it was:
   double-click classification anyway. Three beats is comfortably clear of it.
 - The harness asserts the click rules by counting bridge polls: `0` after a long
   press, `1` after a tap or a double tap (a double is a tap plus its second click).
+- **Two thresholds on the device's indev are tuned for a finger.** LVGL classifies a
+  double click itself, but only when the two taps fall within `scroll_limit` of each
+  other — 10 px by default, which a thumb on a 172 px panel rarely manages, so the
+  double never registered on the panel while the harness (which tapped one exact
+  pixel) always passed. `main.c` sets `scroll_limit` 40 px and `long_press_time`
+  600 ms; the harness sets the same, and `double_click_apart()` taps two points to
+  keep it honest.
 - The screen carries `LV_OBJ_FLAG_CLICKABLE`; the view containers above it stay
   `make_passive`d, so the press is delivered to the screen. `ui_companion_create`
   owns the `ui_tick` timer and deletes the previous one, so a UI rebuild never

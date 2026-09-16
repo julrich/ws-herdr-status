@@ -55,8 +55,8 @@ static lv_coord_t s_scr_w, s_scr_h;   /* the screen's size, read once at create 
 #define SCR_H       (s_scr_h)
 #define HEADLINE_Y  10
 #define BODY_CX     (SCR_W / 2)   /* the face is centred on the panel */
-#define BODY_CY     108
-#define BODY_D      120           /* the face's panel: the widget fills whatever it gets */
+#define BODY_CY     (TINT_H / 2)  /* ...and centred in the tinted one */
+#define BODY_D      100           /* the face's panel: the widget fills whatever it gets */
 #define RIPPLE_D1   (BODY_D + 80) /* the mood-change ring's travel */
 #define PART_TOP0   6             /* ambient motes above the face */
 #define PART_TOP1   42
@@ -192,6 +192,8 @@ typedef struct {
     mood_face_t    reaction;   /* what a change into this mood plays first */
     /* Ambient particles only: the kawaii face brings its own eyes, blush, mouth,
      * tears and sparkles, so the blob's decorations are gone with the blob. */
+    bool           busy;       /* sweep the activity bar behind the headline */
+    uint32_t       activity_ms;/* how long one sweep takes */
     uint32_t       mote_ms;    /* ambient mote cycle; 0 == none */
     lv_opa_t       mote_opa;   /* peak mote opacity */
     int32_t        mote_rise;  /* mote travel, px */
@@ -209,6 +211,7 @@ static const mood_cfg_t s_moods[MOOD_N] = {
                        .face = MOOD_FACE_WORRIED,      .reaction = MOOD_FACE_SURPRISED },
     [MOOD_WORKING] = { .body = COL_WORKING, .headline = "WORKING",
                        .face = MOOD_FACE_WORKING,      .reaction = MOOD_FACE_COOL,
+                       .busy = true, .activity_ms = 1400,
                        .mote_ms = 800, .mote_opa = 255, .mote_rise = 16 },
     [MOOD_DONE]    = { .body = COL_DONE, .headline = "DONE",
                        .face = MOOD_FACE_HAPPY,        .reaction = MOOD_FACE_EXCITED,
@@ -231,6 +234,9 @@ static const char *s_mood_names[MOOD_N] = {
 static const char *TAG = "ui";
 
 static lv_obj_t *s_scr; /* the active screen: background tint target */
+static lv_obj_t *s_tint;       /* the mood-coloured panel behind the face */
+static lv_obj_t *s_activity;   /* its track */
+static lv_obj_t *s_activity_hl;/* ...and the highlight that sweeps along it */
 static lv_obj_t *s_headline;
 static lv_obj_t *s_face;       /* the kawaii face's parent panel: it fills this */
 static lv_obj_t *s_part[PART_N];
@@ -276,6 +282,47 @@ static uint32_t  s_taps;      /* interaction counters, shown by the overlay */
 static uint32_t  s_longs;
 static uint32_t  s_doubles;
 static uint8_t   s_page_due;  /* beats left before the list's page lands, 0 = none */
+
+/* --- the mood panel ------------------------------------------------------- */
+
+/* The tinted panel behind the face, and the headline that sits on it. The panel is
+ * the mood's own colour at low opacity over the screen's near-black, so the text has
+ * to be chosen against *that* rather than against the screen: the mood colour where
+ * it reads there, and a light one where it does not (SLEEP and OFFLINE are dark
+ * enough to vanish into their own tint). */
+#define TINT_H        186    /* ~58% of the panel: down to just above the agent list */
+#define TINT_OPA      46     /* "slightly transparent": the screen stays dominant */
+#define TINT_LUMA_GAP 60     /* how much brighter the text must be than the panel */
+
+#define ACT_X         14     /* the activity bar, at the very top */
+#define ACT_Y         6
+#define ACT_W         (SCR_W - 2 * ACT_X)
+#define ACT_H         6
+#define ACT_HL_W      40
+#define MOOD_HEAD_Y   18     /* the headline sits under the bar, not on it: the highlight
+                              * would otherwise sweep under the text and wreck its
+                              * contrast on the way past */
+
+/* Rec. 601, integer: plenty for a contrast decision. */
+static uint8_t colour_luma(uint32_t rgb)
+{
+    const unsigned r = (rgb >> 16) & 0xFFu, g = (rgb >> 8) & 0xFFu, b = rgb & 0xFFu;
+
+    return (uint8_t)((r * 30u + g * 59u + b * 11u) / 100u);
+}
+
+/* `rgb` at `opa` over the screen's background: what the panel actually looks like. */
+static uint32_t blend_over_bg(uint32_t rgb, uint8_t opa)
+{
+    const unsigned r  = (rgb >> 16) & 0xFFu, g  = (rgb >> 8) & 0xFFu, b  = rgb & 0xFFu;
+    const unsigned br = (COL_BG >> 16) & 0xFFu, bg = (COL_BG >> 8) & 0xFFu, bb = COL_BG & 0xFFu;
+
+    const unsigned nr = br + (r - br) * opa / 255u;
+    const unsigned ng = bg + (g - bg) * opa / 255u;
+    const unsigned nb = bb + (b - bb) * opa / 255u;
+
+    return (nr << 16) | (ng << 8) | nb;
+}
 static uint8_t   s_face_reaction;  /* beats left of a mood-change reaction, 0 = none */
 #define FACE_REACTION_TICKS 6   /* how long a mood change holds its reaction */
 static uint32_t  s_flourish_count;
@@ -295,6 +342,18 @@ static const flourish_cfg_t s_flourish[MOOD_N] = {
 
 static mood_t   s_mood;
 static uint32_t s_last_gen;
+
+/* Output tokens per second, per agent, from successive /stats fetches: the list shows
+ * this for a working agent instead of the word "working", because a number that moves
+ * says more about a busy one than a status that has not changed in an hour. A session
+ * that has gone quiet reports zero rather than its last burst. */
+#define RATE_STALE_S 20
+static uint32_t s_rate[HERDR_MAX_AGENTS];
+static uint32_t s_prev_out[HERDR_MAX_AGENTS];
+static uint32_t s_out_changed_ms[HERDR_MAX_AGENTS];  /* when each total last moved */
+static uint32_t s_sessions_sig;      /* the rows' figures, summed: see ui_tick */
+static bool     s_sessions_moved;
+static bool     s_have_prev;
 static bool     s_last_online;
 static mood_t   s_last_mood;
 static uint32_t s_burst_colour;  /* mood colour of the ripple/tint burst in flight */
@@ -862,6 +921,15 @@ static void stats_line(int idx, const char *fmt, ...)
     lv_label_set_text(s_stats_txt[idx], buf);
 }
 
+/* The activity bar's highlight slides across its track: a plain linear sweep, the
+ * shape of "something is happening" without a percentage to report. */
+static void anim_activity(void *var, int32_t v)
+{
+    lv_obj_t *hl = var;
+
+    lv_obj_set_x(hl, ACT_X + (ACT_W - ACT_HL_W) * v / 1000);
+}
+
 /* Defined with the mood view's list; the session rows use the same colours. */
 static uint32_t state_colour(herdr_agent_state_t st);
 
@@ -1173,7 +1241,28 @@ static void ui_apply_mood(mood_t mood)
     s_mood = mood;
 
     lv_label_set_text(s_headline, m->headline);
-    lv_obj_set_style_text_color(s_headline, lv_color_hex(m->body), 0);
+
+    /* The panel takes the mood's colour, and the headline is chosen against what the
+     * panel actually looks like — not against the screen, which is what the old
+     * colour choice assumed (and what made SLEEP and OFFLINE unreadable). */
+    lv_obj_set_style_bg_color(s_tint, lv_color_hex(m->body), 0);
+
+    const uint32_t panel = blend_over_bg(m->body, TINT_OPA);
+    const uint32_t ink   = (colour_luma(m->body) > colour_luma(panel) + TINT_LUMA_GAP)
+                           ? m->body : COL_TEXT;
+
+    lv_obj_set_style_text_color(s_headline, lv_color_hex(ink), 0);
+
+    /* The activity bar sweeps while there is something to wait for. */
+    lv_anim_del(s_activity_hl, anim_activity);
+    if (m->busy) {
+        lv_obj_clear_flag(s_activity, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_activity_hl, LV_OBJ_FLAG_HIDDEN);
+        start_anim(s_activity_hl, anim_activity, 0, 1000, m->activity_ms, 0, lv_anim_path_linear);
+    } else {
+        lv_obj_add_flag(s_activity, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_activity_hl, LV_OBJ_FLAG_HIDDEN);
+    }
 
     /* The face reacts to the change first and settles into the mood's own
      * expression a few beats later (the countdown runs in ui_tick). A mood whose
@@ -1228,7 +1317,28 @@ static void ui_render_list(const herdr_status_t *s)
             snprintf(buf, sizeof buf, "%.12s", a->label);
         }
         lv_label_set_text(s_row_label[i], buf);
-        lv_label_set_text(s_row_status[i], herdr_state_name(a->state));
+        /* What the agent is *doing*, where that is knowable: a busy one reports its
+         * token rate, an idle one what its session has cost, and the rest keep the
+         * state word they share with the mood. Both figures come from /stats, whose
+         * rows are keyed and ordered like the agents. */
+        herdr_sessions_t sess = { 0 };
+        const bool       have_sessions = herdr_stats_get(&sess) && sess.valid;
+        const int        idx = first + i;
+
+        if (have_sessions && a->state == HERDR_ST_WORKING && s_rate[idx] > 0) {
+            char tok[16], rate[24];
+
+            fmt_tokens(tok, sizeof tok, s_rate[idx]);
+            snprintf(rate, sizeof rate, "%s/s", tok);
+            lv_label_set_text(s_row_status[i], rate);
+        } else if (have_sessions && a->state == HERDR_ST_IDLE) {
+            char cost[16];
+
+            fmt_cost(cost, sizeof cost, sess.per[idx].cost_micro);
+            lv_label_set_text(s_row_status[i], cost);
+        } else {
+            lv_label_set_text(s_row_status[i], herdr_state_name(a->state));
+        }
 
         lv_obj_set_style_bg_color(s_dot[i], lv_color_hex(state_colour(a->state)), 0);
         lv_obj_set_style_opa(s_dot[i], s->online ? LV_OPA_COVER : 100, 0);
@@ -1340,10 +1450,61 @@ static void ui_tick(lv_timer_t *timer)
     if (!herdr_client_get(&s)) return;
 
 
+    /* Tokens/s per agent, from the last two /stats fetches. The bridge refreshes
+     * every few seconds, so this averages over that window; a session that has gone
+     * quiet reports zero rather than its last burst. */
+    {
+        herdr_sessions_t sess = { 0 };
+
+        if (herdr_stats_get(&sess) && sess.valid) {
+            const uint32_t now = lv_tick_get();
+
+            for (int i = 0; i < HERDR_MAX_AGENTS; i++) {
+                const uint32_t out = sess.per[i].tokens_out;
+
+                /* The interval is the one between the totals *changing*, not between
+                 * this tick and the last: /stats refreshes every few seconds while
+                 * ui_tick runs every 200 ms, so dividing by the tick would report the
+                 * whole bridge interval's tokens as a fifth of a second's work. */
+                if (out != s_prev_out[i]) {
+                    if (s_have_prev && out > s_prev_out[i] && s_out_changed_ms[i] != 0) {
+                        const uint32_t dt = now - s_out_changed_ms[i];
+
+                        if (dt > 0) {
+                            s_rate[i] = (uint32_t)(((uint64_t)(out - s_prev_out[i]) * 1000u) / dt);
+                        }
+                    }
+                    s_out_changed_ms[i] = now;
+                }
+
+                if (sess.per[i].age_s > RATE_STALE_S) {
+                    s_rate[i] = 0;   /* nothing is being written: not "busy" now */
+                }
+                s_prev_out[i] = out;
+            }
+
+            s_have_prev = true;
+        }
+
+        /* A cheap signature of what the rows display, so a change in it counts as
+         * something to redraw (see the freshness test below). */
+        uint32_t sig = 0;
+
+        for (int i = 0; i < HERDR_MAX_AGENTS; i++) {
+            sig += sess.per[i].tokens_out + sess.per[i].cost_micro;
+        }
+        s_sessions_moved = (sig != s_sessions_sig);
+        s_sessions_sig   = sig;
+    }
+
     const mood_t mood = mood_for(&s);
     const bool mood_changed = (mood != s_last_mood);
     const bool online_changed = (s.online != s_last_online);
-    const bool fresh = (s.gen != s_last_gen) || online_changed;
+    /* The rows show session figures, so a tick that moves those has to redraw them
+     * even when no agent's state changed — otherwise a working row would keep saying
+     * "working" until the mood or the agent list happened to change again. The
+     * signature is the same numbers the rows read, summed. */
+    const bool fresh = (s.gen != s_last_gen) || online_changed || s_sessions_moved;
     s_last_gen = s.gen;
     s_last_online = s.online;
     /* A list tap's page lands here, a few beats after the tap (see PAGE_DELAY_TICKS). */
@@ -1539,6 +1700,40 @@ void ui_companion_create(void)
         }
     }
 
+    /* The mood panel, created first so everything else draws over it: the face's
+     * half of the screen in the mood's own colour at low opacity. What the headline
+     * does about it is in ui_apply_mood(). */
+    s_tint = lv_obj_create(s_mood_cont);
+    make_passive(s_tint);
+    lv_obj_set_size(s_tint, SCR_W, TINT_H);
+    lv_obj_set_pos(s_tint, 0, 0);
+    lv_obj_set_style_bg_opa(s_tint, TINT_OPA, 0);
+    lv_obj_set_style_border_width(s_tint, 0, 0);
+    lv_obj_set_style_radius(s_tint, 0, 0);
+    lv_obj_set_style_pad_all(s_tint, 0, 0);
+
+    /* The activity bar, behind the headline: a dim track and the highlight that
+     * sweeps along it while the mood is busy. */
+    s_activity = lv_obj_create(s_mood_cont);
+    make_passive(s_activity);
+    lv_obj_set_size(s_activity, ACT_W, ACT_H);
+    lv_obj_set_pos(s_activity, ACT_X, ACT_Y);
+    lv_obj_set_style_bg_color(s_activity, lv_color_hex(COL_TRACK), 0);
+    lv_obj_set_style_bg_opa(s_activity, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_activity, ACT_H / 2, 0);
+    lv_obj_set_style_border_width(s_activity, 0, 0);
+    lv_obj_set_style_pad_all(s_activity, 0, 0);
+
+    s_activity_hl = lv_obj_create(s_mood_cont);
+    make_passive(s_activity_hl);
+    lv_obj_set_size(s_activity_hl, ACT_HL_W, ACT_H);
+    lv_obj_set_pos(s_activity_hl, ACT_X, ACT_Y);
+    lv_obj_set_style_bg_color(s_activity_hl, lv_color_hex(COL_TEXT), 0);
+    lv_obj_set_style_bg_opa(s_activity_hl, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_activity_hl, ACT_H / 2, 0);
+    lv_obj_set_style_border_width(s_activity_hl, 0, 0);
+    lv_obj_set_style_pad_all(s_activity_hl, 0, 0);
+
     /* Bottom-most children: the mood-change rings wash out from behind the face. */
     for (int i = 0; i < RIPPLE_N; i++) {
         s_ripple[i] = create_blob(s_mood_cont, BODY_D, BODY_D, BODY_CX, BODY_CY);
@@ -1558,7 +1753,7 @@ void ui_companion_create(void)
     make_passive(s_headline);
     lv_obj_set_style_text_font(s_headline, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_letter_space(s_headline, 1, 0);
-    lv_obj_align(s_headline, LV_ALIGN_TOP_MID, 0, HEADLINE_Y);
+    lv_obj_align(s_headline, LV_ALIGN_TOP_MID, 0, MOOD_HEAD_Y);
 
     /* The face itself: a widget from components/lvgl_kawaii_face (wrapped by
      * mood_face.c) that fills this panel, so the panel's size and position are the
@@ -1672,6 +1867,10 @@ void ui_companion_create(void)
     /* Deterministic first frame: OFFLINE matches the pre-poll shared state
      * (gen 0, online false), so the first ui_tick that carries data re-renders. */
     s_last_gen = 0;
+    s_have_prev = false;   /* a rebuilt screen starts with no rate history */
+    memset(s_prev_out, 0, sizeof s_prev_out);
+    memset(s_out_changed_ms, 0, sizeof s_out_changed_ms);
+    memset(s_rate, 0, sizeof s_rate);
     s_last_online = false;
     s_last_mood = MOOD_OFFLINE;
     ui_apply_mood(MOOD_OFFLINE);
