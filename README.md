@@ -3,8 +3,8 @@
 A desk companion that shows what the coding agents on this machine are doing. An
 ESP32-C6 board with a 172x320 panel sits on the desk, joins WiFi and draws the
 live state of the agents running in [herdr](https://herdr.dev) as
-a small animated blob with an agent list under it. Turn the board and the UI
-follows into landscape.
+a small kawaii face with an agent list under it. The panel is portrait, always:
+172x320, the face above the list.
 
 No cable to the PC is needed after flashing: the device polls a tiny HTTP bridge
 running on the PC.
@@ -17,11 +17,10 @@ herdr ──(unix socket, JSON)──> bridge/herdr_status_bridge.py ──(HTTP
 | Path | What it is |
 |---|---|
 | `bridge/herdr_status_bridge.py` | PC side. Reads herdr over its Unix socket, serves `GET /state` and `GET /stats` on the LAN. Python 3 stdlib only, no dependencies. |
-| `main/` | Firmware: WiFi station, HTTP poller, the LVGL companion, and the IMU-driven rotation. |
+| `main/` | Firmware: WiFi station, HTTP poller and the LVGL companion. |
 | `components/` | Board drivers (JD9853 panel, AXS5106L touch, BSP glue) plus two fixes to the vendor touch driver, see *Notes*. |
 | `tools/ui_host_test/` | Renders the UI on the host and asserts on pixels — the only way to check the artwork without eyes on the panel. |
-| `tools/rotation_test/` | Host test for the turn detector behind the rotation feature. |
-| `AGENTS.md` | The board's bring-up notes and this project's invariants. Read §11 before changing display, touch or rotation code. |
+| `AGENTS.md` | The board's bring-up notes and this project's invariants. Read §11 before changing display or touch code. |
 
 ## What you need
 
@@ -85,11 +84,7 @@ be added to `sdkconfig.defaults`.
   and the money spent, with a row per agent — and the list's half pages to the
   link and device figures.
 - **Double tap the bottom half**, or **hold a finger down** (~1 s) anywhere, to
-  raise the diagnostics overlay (heap, LVGL pool, link health, IMU, input
-  counters). The same double tap, or another hold, drops it.
-- **Turn the board a quarter turn** and the UI follows into landscape, or back
-  into portrait; the halves turn with it, so the face's half is the left one. The
-  choice is remembered across power cycles.
+  raise the diagnostics overlay (heap, LVGL pool, link health, input counters). The same double tap, or another hold, drops it.
 
 The panel reports a single touch, so that is the whole vocabulary: two halves,
 tap or double tap in each, plus a hold. Swipes were tried first and dropped — a
@@ -117,8 +112,6 @@ Set with `idf.py menuconfig` → *Herdr status companion*:
 | `HERDR_BRIDGE_HOST` / `HERDR_BRIDGE_PORT` | `192.168.2.203` / `8787` | Where the bridge listens. |
 | `HERDR_POLL_PERIOD_MS` | `1000` | Sleep between polls; the cadence is this plus one HTTP round trip. |
 | `HERDR_UI_MAX_AGENTS` | `4` | Rows shown (1-6). Extra agents surface as `+N` in the summary. |
-| `HERDR_IMU_ROTATE` | `y` | Follow the IMU when the board is turned. Off = pinned portrait. |
-| `HERDR_IMU_LOG_RAW` | `n` | Log raw acceleration and turn rate once a second. Useful when checking the IMU on a new board. |
 
 ## Tests
 
@@ -126,13 +119,12 @@ Set with `idf.py menuconfig` → *Herdr status companion*:
 make ui-test              # 24 pixel scenarios: every mood, the burst, the idle
                           # animations, decorations, both orientations, and the
                           # gestures driven through LVGL's own pointer events
-make rotation-test        # 15 cases: axis calibration, quarter turns, jitter and
-                          # drift rejection, lockout, 180-degree turns
 ```
 
-Both run on the host, need no hardware, and exit non-zero on failure. `make
-ui-test` writes `tools/ui_host_test/frame_*.ppm` (gitignored) so the art can be
-eyeballed.
+It runs on the host, needs no hardware, and exits non-zero on failure.
+`make ui-test` writes `tools/ui_host_test/frame_*.ppm` (gitignored) so the art can
+be eyeballed — the mood face included, since the harness builds the real kawaii
+component.
 
 ## What healthy looks like
 
@@ -141,8 +133,6 @@ I wifi: connected, ip=192.168.2.222
 I herdr: GET http://192.168.2.203:8787/state -> 200 (228 bytes)
 I herdr: gen=1235 online=1 agents=2 blocked=0 working=1 done=0 idle=1
 I ui: mood=working online=1 agents=2 overflow=0
-I imu: found (WHO_AM_I = 0x05)
-I app: rotation 0, logical 172x320
 ```
 
 Two failure modes worth knowing (both degrade rather than break):
@@ -150,11 +140,6 @@ Two failure modes worth knowing (both degrade rather than break):
 - **No `I2C read error!` lines from the touch driver** over minutes is the bus
   health signal. If the touch controller stops acknowledging, the driver logs it
   and the UI keeps running; a power cycle clears it.
-- **The IMU can go quiet** on this board. The firmware says so plainly
-  (`imu: read failed … watching for recovery`, then
-  `QMI8658 stopped responding and cannot be reset in software — unplug the board`)
-  and keeps running in portrait. There is no reset pin and its supply is
-  hard-wired, so only a power cycle brings rotation back.
 
 If nothing appears at all, check the cable is data-capable and the console
 (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`) reaches `/dev/ttyACM0` — see AGENTS.md §3.
@@ -167,8 +152,8 @@ The firmware carries two fixes to the vendor touch driver, both in
 - the register read stays the vendor's two transactions (`i2c_master_transmit`
   then `i2c_master_receive`) because this controller NACKs the repeated-start
   form — measured, see AGENTS.md §7 — but the transmit result is now checked, so a
-  blind receive never follows an unacknowledged address phase and the IMU sharing
-  the bus is not knocked out;
+  blind receive never follows an unacknowledged address phase. (The QMI8658A on the
+  same bus is what that used to knock out; this project no longer uses it.)
 - the controller is read when INT says a report is ready, and also while the last
   report still says a finger is down. Both halves are load-bearing, and both were
   measured the hard way: reading on every poll is NACKed every time at idle (the
@@ -184,11 +169,10 @@ The panel is **single-touch**, and the way the second point fails is in AGENTS.m
 8-byte one succeeds. Anything that needs two fingers is not available here.
 
 Deeper notes — the panel's GRAM gap, the ASCII-only fonts, the LVGL port's
-behaviour, the IMU's 1000 ms I2C timeout and the rotation conventions — live in
-`AGENTS.md` §11. Read it before touching display, touch or rotation code.
+behaviour, and the fact that this project is portrait for good — live in
+`AGENTS.md` §11. Read it before touching display or touch code.
 
 ## Contributing
 
 New development happens on a branch, reviewed as a pull request; the maintainer
-merges. `main` is expected to build and to pass `make ui-test` and
-`make rotation-test`.
+merges. `main` is expected to build and to pass `make ui-test`.

@@ -564,7 +564,7 @@ Only display + LVGL + touch were exercised. Untested on hardware:
 - Name branches by intent: `feat/<topic>`, `fix/<topic>`, `docs/<topic>`, and
   push (`git push -u origin <branch>`) so the PR can be opened against it.
 - Before asking for review: it must build (`make fw-build`) and both host suites
-  must pass (`make ui-test`, `make rotation-test`). Say in the PR what you
+  must pass (`make ui-test`). Say in the PR what you
   verified on hardware and what you could not — a panel needs eyes, a touch
   needs a finger, a turn needs a hand.
 - Never commit generated files: `sdkconfig` (it holds the WiFi password),
@@ -641,68 +641,24 @@ Two halves, no USB link needed after flashing:
   200 ms-then-backlight sequence are inherited from the template's `main.c`
   (§5); keep them.
 
-### Rotation and the IMU
+### Orientation: there isn't one
 
-- `main/imu_qmi8658.c` drives the QMI8658A on the shared I2C bus at **0x6B**
-  (WHO_AM_I 0x05) with the vendor's register sequence, taken from the demo zip's
-  `ESP-IDF/01_factory/components/esp_bsp/bsp_qmi8658.c`: `RESET <- 0xB0`, 10 ms,
-  `CTRL1 <- 0x40` (auto-increment), `CTRL7 <- 0x03` (enable both), `CTRL2 <- 0x95`
-  (±4 g, 250 Hz), `CTRL3 <- 0xD5` (±512 dps, 250 Hz). Accel `4/32768` g/LSB,
-  gyro `512/32768` dps/LSB, data ready in `STATUS0 & 0x03`.
-- **Orientation is detected with the gyro, not the accelerometer.** A device
-  lying on a desk is turned by spinning it about the screen's normal axis, and
-  gravity is blind to that motion; the gyro's component along the normal
-  integrates into a turn angle, and ±55° commits a ±90° rotation
-  (`main/rotation_logic.c`, host-tested by `make rotation-test`).
-- The **normal axis is calibrated at runtime** from the accelerometer at rest
-  (the axis reading ~1 g is the normal, its sign says which way the screen
-  faces), so nothing here depends on how the IMU happens to be mounted. That
-  calibration is what makes this board-independent — do not replace it with
-  hard-coded axis constants. Measured on this unit: `axis=1 (Y), sign=-1`, i.e.
-  the panel normal is the chip's -Y.
-- The calibration is latched while the device sits in the attitude it boots in
-  (a flat device puts ~1 g on the panel normal, hence the 0.8 g threshold). It
-  stays valid as long as the device is only *turned about that normal* — which
-  is the rotation gesture. If the device is later stood up or rolled onto a
-  different face, the axis it integrates is no longer the screen normal and a
-  turn would be misread; a reboot re-calibrates. Doing better needs a
-  magnetometer or a fixed mounting datum, neither of which this board offers.
-- `main/main.c: app_apply_rotation(deg)` is the only place hardware follows the
-  orientation. Order matters: set the driver's `hor_res`/`ver_res` and call
-  `lv_disp_drv_update()` **first** (that fires esp_lvgl_port's `drv_update_cb`,
-  which resets the panel to its base mapping), then apply the panel table below,
-  then the touch flags, then rebuild the UI on a fresh screen. Validated
-  on-device by sweeping all four orientations (`rot_sweep`, see §9b).
-- Panel (`esp_lcd_panel_swap_xy` / `_mirror` / `_set_gap`) and touch
-  (`esp_lcd_touch_set_swap_xy/_mirror_x/_mirror_y`) values are the vendor's
-  (§5, §7) verbatim: 0 → (no swap, no mirror, gap 34/0), 90 → (swap, mirror_x,
-  gap 0/34), 180 → (no swap, mirror x+y, gap 34/0), 270 → (swap, mirror_y,
-  gap 0/34); touch 0 → (0,1,0), 90 → (1,0,0), 180 → (0,0,1), 270 → (1,1,1).
-- The chosen orientation is kept in NVS (`herdr`/`rot`, stored as quarter turns)
-  so a power cycle comes back the way the device was left.
-  `CONFIG_HERDR_IMU_ROTATE=n` pins portrait.
-- **The IMU's I2C timeout must stay at the vendor's 1000 ms.** With a 100 ms
-  timeout this board's IMU reads failed in bulk (measured: a handful of samples
-  per minute, `ESP_ERR_TIMEOUT` cascading, while the *init* read succeeded) —
-  aborting a transaction leaves the chip's read pointer mid-transfer and the
-  next read inherits the mess. At 1000 ms the same code streams at the full poll
-  rate with zero failures. The chip is also polled at 10 Hz, not 250: on this
-  unit the link degrades under continuous traffic (growing timeout rates after a
-  minute or two) whatever the timeout or bus speed, and the detector only needs
-  a few samples per gesture. It stays at the touch controller's 400 kHz on the
-  same bus — running the two at different clock rates is not worth the bus
-  re-clocking.
-- **The chip cannot be reset from firmware**: no reset pin, and its VDD/VDDIO go
-  straight to 3V3 (schematic U3 pins 5 and 8, no load switch), so a wedged IMU
-  needs a power cycle. The driver latches off after two failed revival attempts
-  instead of hammering the bus, logs `QMI8658 stopped responding … unplug the
-  board`, and the companion keeps running in portrait. Init failure is equally
-  graceful: one warning, task exits, no rotation.
-- The UI lays itself out for whatever screen it is given
-  (`ui_layout_init()`): portrait stacks the agent list under the face at
-  172x320, landscape puts the face on the left and the list on the right at
-  320x172. `make ui-test` covers both (`land_*` scenarios drive the same
-  resolution switch the device uses).
+**This project is portrait, always: 172x320, the face above the agent list.** It used
+to follow the IMU — a gyro-integrated turn detector, a four-way panel/touch mapping
+table and a second layout for landscape — and that is gone: the board sits upright and
+the detector was the least reliable part of the device. `ui_layout_init()` records the
+screen's size and nothing else; the layout constants in `ui_companion.c` are written
+against 172x320, and the harness's scenarios are portrait.
+
+The IMU (QMI8658A, on the touch controller's I2C bus) is therefore **unused**. If it
+is ever wanted again, two things measured while it was:
+
+- **its I2C timeout has to be the vendor's 1000 ms.** With 100 ms this board's reads
+  failed in bulk (a handful of samples per minute, `ESP_ERR_TIMEOUT` cascading) —
+  aborting a transaction leaves the chip's read pointer mid-transfer and the next read
+  inherits the mess;
+- **it cannot be reset from firmware**: no reset pin, and its VDD/VDDIO go straight to
+  3V3 (schematic U3 pins 5 and 8, no load switch), so a wedged IMU needs a power cycle.
 
 ### Touch input, views and the stats source
 
@@ -734,9 +690,9 @@ Two halves, no USB link needed after flashing:
   | hold, anywhere | the overlay too |
 
 - The halves are **equal halves of the long side**, and the artwork keeps its roles
-  in both orientations (`ui_layout_init`): portrait puts the face in the top half
-  and the list below it, landscape puts the face on the left and the list beside
-  it. So "the face's half" is always the first half along the split axis.
+  in the layout `ui_layout_init` sets out: the face occupies the top half and the
+  list the bottom, so "the face's half" is always the top one. There is no other
+  orientation — see "Orientation: there isn't one".
 - Two asymmetries are deliberate. The **face's tap is immediate** — it is the one
   that wants feedback, and its double (the view switch) is orthogonal, so both may
   happen on a double. The **list's tap is deferred by `PAGE_DELAY_TICKS`** (three of
@@ -752,12 +708,12 @@ Two halves, no USB link needed after flashing:
   press, `1` after a tap or a double tap (a double is a tap plus its second click).
 - The screen carries `LV_OBJ_FLAG_CLICKABLE`; the view containers above it stay
   `make_passive`d, so the press is delivered to the screen. `ui_companion_create`
-  owns the `ui_tick` timer and deletes the previous one, so a rotation rebuild never
+  owns the `ui_tick` timer and deletes the previous one, so a UI rebuild never
   leaves a timer running against freed widgets.
 - The two views are two `lv_obj` containers, both children of the single screen,
   each at the origin so children keep the coordinates they were written with;
   switching is one hidden flag. Do not turn them into separate LVGL screens:
-  main.c's rotation path auto-deletes the old screen, so a second screen's stored
+  main.c's rebuild path auto-deletes the old screen, so a second screen's stored
   pointer would dangle.
 - The diagnostics overlay is created on demand and deleted on the next long
   press; `ui_companion_create()` clears those pointers because they die with the
@@ -807,8 +763,8 @@ Two halves, no USB link needed after flashing:
   panel shows.
 - `main/ui_companion.c` and `main/ui_stats.h` stay free of
   esp_* includes; the diagnostics getters declared in `ui_stats.h` are esp-side
-  (`herdr_client.c`, `ui_rotation.c`, `ui_input.c`, `ui_device.c`) and the host
-  harness stubs them, exactly as it stubs `herdr_client_get()`.
+  (`herdr_client.c`, `ui_device.c`) and the host harness stubs them, exactly as it
+  stubs `herdr_client_get()`.
 
 ### What "working" looks like in the log
 

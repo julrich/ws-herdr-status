@@ -23,7 +23,6 @@
 #include "bsp_touch.h"
 #include "herdr_client.h"
 #include "ui_companion.h"
-#include "ui_rotation.h"
 #include "wifi_sta.h"
 
 static const char *TAG = "app";
@@ -50,83 +49,44 @@ static esp_lcd_panel_handle_t s_panel;
 static esp_lcd_touch_handle_t s_touch;
 static i2c_master_bus_handle_t s_i2c;
 static lv_display_t *s_disp;
-static int s_rotation;
 
 i2c_master_bus_handle_t app_hw_i2c(void) { return s_i2c; }
 esp_lcd_panel_handle_t  app_hw_panel(void) { return s_panel; }
 esp_lcd_touch_handle_t  app_hw_touch(void) { return s_touch; }
 lv_display_t           *app_hw_disp(void) { return s_disp; }
-int                     app_rotation(void) { return s_rotation; }
 
 /* The vendor's table for this panel (AGENTS.md §5) and its touch driver (§7).
  * Both are indexed by the angle the *device* has been turned by. */
-static void apply_panel(int deg)
+/* The vendor's mapping for this panel (AGENTS.md §5), in the one orientation this
+ * project uses: no swap, no mirror, and the 34 px GRAM gap. */
+static void apply_panel(void)
 {
-    switch (deg) {
-    case 90:
-        esp_lcd_panel_swap_xy(s_panel, true);
-        esp_lcd_panel_mirror(s_panel, true, false);
-        esp_lcd_panel_set_gap(s_panel, 0, 34);
-        break;
-    case 180:
-        esp_lcd_panel_swap_xy(s_panel, false);
-        esp_lcd_panel_mirror(s_panel, true, true);
-        esp_lcd_panel_set_gap(s_panel, LCD_GAP_X, LCD_GAP_Y);
-        break;
-    case 270:
-        esp_lcd_panel_swap_xy(s_panel, true);
-        esp_lcd_panel_mirror(s_panel, false, true);
-        esp_lcd_panel_set_gap(s_panel, 0, 34);
-        break;
-    default:
-        esp_lcd_panel_swap_xy(s_panel, false);
-        esp_lcd_panel_mirror(s_panel, false, false);
-        esp_lcd_panel_set_gap(s_panel, LCD_GAP_X, LCD_GAP_Y);
-        break;
-    }
+    esp_lcd_panel_swap_xy(s_panel, false);
+    esp_lcd_panel_mirror(s_panel, false, false);
+    esp_lcd_panel_set_gap(s_panel, LCD_GAP_X, LCD_GAP_Y);
 }
 
-bool app_apply_rotation(int deg)
+/* Build the UI on a fresh screen, in the panel's one supported orientation. The old
+ * screen is freed by the auto-delete (the host harness relies on the same behaviour).
+ *
+ * This used to be app_apply_rotation(), which re-pointed the panel, the touch
+ * mapping and the display resolution whenever the IMU saw a quarter turn. That is
+ * gone: the board sits upright with the face above the list, and the panel and touch
+ * are left exactly as bsp_touch_init() and the vendor's table set them up. */
+static void app_build_ui(void)
 {
-    if (deg != 0 && deg != 90 && deg != 180 && deg != 270) {
-        ESP_LOGW(TAG, "ignoring rotation %d", deg);
-        return false;
-    }
     if (s_disp == NULL || s_panel == NULL) {
-        return false;
+        return;
     }
-
-    const bool landscape = (deg == 90 || deg == 270);
-    const int  w = landscape ? LCD_V_RES : LCD_H_RES;
-    const int  h = landscape ? LCD_H_RES : LCD_V_RES;
 
     if (!lvgl_port_lock(0)) {
-        return false;
+        return;
     }
 
-    /* Logical resolution first: this fires LV_EVENT_RESOLUTION_CHANGED, which the
-     * port handles by resetting the panel to its base mapping — so the panel
-     * configuration has to come after this, not before. */
-    lv_display_set_resolution(s_disp, w, h);
-
-    apply_panel(deg);
-
-    if (s_touch != NULL) {
-        esp_lcd_touch_set_swap_xy(s_touch, deg == 90 || deg == 270);
-        esp_lcd_touch_set_mirror_x(s_touch, deg == 0 || deg == 270);
-        esp_lcd_touch_set_mirror_y(s_touch, deg == 180 || deg == 270);
-    }
-
-    /* Rebuild the UI on a fresh screen at the new size; the old one is freed by
-     * the auto-delete (the host harness relies on the same behaviour). */
     lv_scr_load_anim(lv_obj_create(NULL), LV_SCR_LOAD_ANIM_NONE, 0, 0, true);
     ui_companion_create();
 
     lvgl_port_unlock();
-
-    s_rotation = deg;
-    ESP_LOGI(TAG, "rotation %d, logical %dx%d", deg, w, h);
-    return true;
 }
 
 static esp_err_t lvgl_start(void)
@@ -202,10 +162,8 @@ void app_main(void)
     wifi_sta_start();
     herdr_client_start();
 
-    /* Build the UI at the orientation the device was last used in, then let the
-     * IMU take over. app_apply_rotation() creates the screen itself. */
-    app_apply_rotation(ui_rotation_restore());
-    ui_rotation_start();
+    /* Build the UI. app_build_ui() creates the screen itself. */
+    app_build_ui();
 
     /* Light the backlight only after the first frame has been pushed out, so
      * the uninitialised GRAM is never visible. */

@@ -38,7 +38,6 @@ lv_display_t           *app_hw_disp(void);
 bool app_apply_rotation(int deg);
 
 /* The orientation currently applied (0, 90, 180 or 270). */
-int app_rotation(void);
 
 #ifdef __cplusplus
 }
