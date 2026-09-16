@@ -68,10 +68,8 @@ static lv_coord_t s_scr_w, s_scr_h;   /* the screen's size, read once at create 
 #define LIST_Y0     194
 #define LIST_ROW_H  24
 #define LIST_W      (SCR_W - 16)
-#define SUMMARY_Y   299   /* one pixel closer to the hairline, which is one
-                             * closer to the rows: the block reads thinner
-                             * at the same font size */
-#define RULE_Y      295       /* the hairline above the summary line */
+#define SUMMARY_Y   300
+#define RULE_Y      294       /* the hairline above the summary line */
 #define RULE_H      1
 
 /* Sizes that do not scale with the face. */
@@ -1869,7 +1867,13 @@ void ui_companion_create(void)
     make_passive(s_summary);
     lv_obj_set_style_text_font(s_summary, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(s_summary, lv_color_hex(COL_DIM), 0);
-    lv_obj_align(s_summary, LV_ALIGN_TOP_MID, 0, SUMMARY_Y);
+    /* The text keeps its 12 px face, and the box gives up a pixel at each end. The
+     * font's line height *is* the text's extent (ascender through descender), so a box
+     * trimmed by two would clip the descenders — the padding pulls the line up inside
+     * it instead, which is where the top pixel comes from. */
+    lv_obj_set_height(s_summary, lv_font_montserrat_12.line_height - 2);
+    lv_obj_set_style_pad_top(s_summary, -1, 0);
+    lv_obj_align(s_summary, LV_ALIGN_TOP_MID, 0, SUMMARY_Y - 1);
 
     /* Stats view: a title plus a fixed block of lines, refreshed by
      * ui_stats_render() whenever it is on screen. */
