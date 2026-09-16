@@ -104,12 +104,10 @@ bool app_apply_rotation(int deg)
         return false;
     }
 
-    /* Logical resolution first: lv_disp_drv_update() runs the port's
-     * drv_update_cb, which resets the panel to its base mapping — so the panel
+    /* Logical resolution first: this fires LV_EVENT_RESOLUTION_CHANGED, which the
+     * port handles by resetting the panel to its base mapping — so the panel
      * configuration has to come after this, not before. */
-    s_disp->driver->hor_res = w;
-    s_disp->driver->ver_res = h;
-    lv_disp_drv_update(s_disp, s_disp->driver);
+    lv_display_set_resolution(s_disp, w, h);
 
     apply_panel(deg);
 
@@ -157,6 +155,10 @@ static esp_err_t lvgl_start(void)
         },
         .flags = {
             .buff_dma = true,
+            /* LVGL 8 took the panel's byte order from CONFIG_LV_COLOR_16_SWAP;
+             * LVGL 9 dropped that option and the port passes it to the display
+             * instead. Same JD9853, same big-endian RGB565 (AGENTS.md §6). */
+            .swap_bytes = 1,
         },
     };
     lv_display_t *disp = lvgl_port_add_disp(&disp_cfg);

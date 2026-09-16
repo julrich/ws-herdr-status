@@ -420,6 +420,7 @@ static lv_obj_t *s_stats_dot[STATS_ROWS];    /* one per session row */
 static uint32_t  s_taps;      /* interaction counters, shown by the overlay */
 static uint32_t  s_longs;
 static uint32_t  s_doubles;
+static uint8_t   s_page_due;  /* beats left before the list's page lands, 0 = none */
 static uint32_t  s_flourish_count;
 static int       s_stats_page;    /* the stats view has two pages of its own */
 static int       s_stats_pages;
@@ -1117,7 +1118,7 @@ void ui_companion_on_page(int dir)
 void ui_companion_on_toggle_overlay(void)
 {
     if (s_overlay != NULL) {
-        lv_obj_del(s_overlay); /* takes the label with it */
+        lv_obj_delete(s_overlay); /* takes the label with it */
         s_overlay      = NULL;
         s_overlay_text = NULL;
         UI_LOGI(TAG, "overlay off");
@@ -1194,7 +1195,7 @@ static void ui_overlay_render(void)
              (unsigned)imu.rate_hz, (unsigned)imu.errors,
              (int)imu.axis, imu.calibrated ? "cal" : "raw",
              (imu.sign > 0) ? '+' : '-', imu.present ? "ok" : "gone",
-             SPLIT ? 1 : 0, SCR_W, SCR_H,
+             SPLIT ? 1 : 0, (int)SCR_W, (int)SCR_H,
              (unsigned)s_taps, (unsigned)s_longs,
              (unsigned)s_doubles, ui_view_name(s_view));
 
@@ -1405,7 +1406,7 @@ static void ui_stats_render(void)
         stats_row(9, STATS_X_LEFT, "input");
         stats_val(9, "%u tap  %u dbl", (unsigned)s_taps, (unsigned)s_doubles);
         stats_row(10, STATS_X_LEFT, "rot");
-        stats_val(10, "%s %dx%d", SPLIT ? "land" : "port", SCR_W, SCR_H);
+        stats_val(10, "%s %dx%d", SPLIT ? "land" : "port", (int)SCR_W, (int)SCR_H);
 
         s_stats_pages = 2;
         return;
@@ -1811,6 +1812,11 @@ static void ui_tick(lv_timer_t *timer)
     const bool fresh = (s.gen != s_last_gen) || online_changed;
     s_last_gen = s.gen;
     s_last_online = s.online;
+    /* A list tap's page lands here, a few beats after the tap (see PAGE_DELAY_TICKS). */
+    if (s_page_due != 0 && --s_page_due == 0) {
+        ui_companion_on_page(1);
+    }
+
     if (!fresh) return;
 
     if (mood != s_mood) {
@@ -1853,7 +1859,7 @@ static void ui_tick(lv_timer_t *timer)
  * thing on this panel: a drag that LVGL reads as a gesture also suppresses the
  * click, so a swipe that fell short did nothing at all, and one that carried on
  * into the wrong object did something else. The screen is small enough to reach
- * every corner, so the vocabulary is now positional.
+ * every corner, so the vocabulary is positional.
  *
  * The long side of the screen is split into two equal halves, and the artwork
  * keeps the same roles in both orientations — portrait puts the face in the top
@@ -1865,102 +1871,79 @@ static void ui_tick(lv_timer_t *timer)
  *   tap    the list's half    forward a page (the agent list, or the stats page)
  *   double the face's half    the other view
  *   double the list's half    the diagnostics overlay
- *   hold   anywhere           the overlay too, unchanged
+ *   hold   anywhere           the overlay too, and nothing else
  *
- * The face's tap fires immediately: it is the one that wants feedback, and its
- * double (the other view) is orthogonal to it, so both may happen. The list's tap
- * pages, which a double cannot also do, so that one waits out the double window
- * (DOUBLE_MS) and is cancelled if a second tap arrives. */
-#define DOUBLE_MS 350   /* slow enough for a deliberate double tap */
+ * LVGL 9 tells single clicks from doubles itself (SINGLE_CLICKED / DOUBLE_CLICKED,
+ * classified inside the long-press time), which is a good deal less code and less
+ * guesswork than the hand-rolled window this used to keep: it also means a long
+ * press sends no click at all, so a hold cannot be mistaken for a tap.
+ *
+ * The face's tap acts at once — it is the one that wants feedback, and its double
+ * only switches view, which is orthogonal. The list's tap pages, which a double
+ * cannot also do, so it waits out the window in a one-shot timer that the double
+ * cancels. */
+/* The list's tap pages forward, but only if no second tap arrives: paging straight
+ * away and undoing it on a double flickers through a page nobody asked for. The wait
+ * is counted in ui_tick's own 200 ms beats rather than kept in a one-shot lv_timer,
+ * because it has to outlast LVGL's double-click classification — and three beats
+ * (~600 ms) clears even a deliberate double. */
+#define PAGE_DELAY_TICKS 3
 
-static bool       s_long_fired;
-static bool       s_have_last_click;
-static uint32_t   s_last_click_tick;
-static bool       s_last_click_list;
-static lv_timer_t *s_page_timer;   /* the list's single tap, waiting out the double window */
+static lv_timer_t *s_ui_timer;     /* the 200 ms ui_tick timer, owned per screen */
 
-/* The list's tap pages forward, but only once the double window has passed without
- * a second tap: paging straight away and undoing it on a double flickers through a
- * page nobody asked for, and depends on the exact state the previous click left
- * behind. The face's tap stays immediate — that is the one that wants feedback. */
-static void page_timer_cb(lv_timer_t *t)
+static void page_delay_cancel(void)
 {
-    (void)t;
-    s_page_timer = NULL;   /* one-shot: LVGL frees it once this returns */
-    ui_companion_on_page(1);
+    s_page_due = 0;
+}
+
+/* Which half the pointer is in. Portrait: the list is the bottom half. Landscape:
+ * the list is the right half, its column starting at x=148 of 320. */
+static bool event_in_list_half(lv_event_t *e)
+{
+    /* LVGL 9 hands the indev over as the event's parameter; lv_event_get_indev() is
+     * NULL for these click events. Fall back to the active indev, which is this one
+     * while its own event is being dispatched. */
+    const lv_indev_t *indev = lv_event_get_param(e);
+    lv_point_t        p = { 0, 0 };
+
+    if (indev == NULL) {
+        indev = lv_indev_active();
+    }
+    if (indev == NULL) {
+        return false;
+    }
+    lv_indev_get_point(indev, &p);
+
+    return SPLIT ? (p.x >= SCR_W / 2) : (p.y >= SCR_H / 2);
 }
 
 static void screen_event_cb(lv_event_t *e)
 {
     switch (lv_event_get_code(e)) {
-    case LV_EVENT_PRESSED:
-        s_long_fired = false;
-        break;
-
-    case LV_EVENT_LONG_PRESSED:
-        s_long_fired = true;
-        s_longs++;
-        ui_companion_on_toggle_overlay();
-        break;
-
-    case LV_EVENT_CLICKED: {
-        if (s_long_fired) {
-            break; /* the long press owns this press */
-        }
-
-        const lv_indev_t *indev = lv_indev_get_act();
-        if (indev == NULL) {
-            break;
-        }
-
-        lv_point_t p = { 0, 0 };
-        lv_indev_get_point(indev, &p);
-
-        /* Portrait: the list is the bottom half. Landscape: the list is the right
-         * half, its column starting at x=148 of 320. */
-        const bool list_half = SPLIT ? (p.x >= SCR_W / 2) : (p.y >= SCR_H / 2);
-
-        const bool dbl = s_have_last_click && (s_last_click_list == list_half) &&
-                         lv_tick_elaps(s_last_click_tick) <= DOUBLE_MS;
-
-        s_have_last_click = !dbl; /* a third click starts over rather than chaining */
-        s_last_click_tick = lv_tick_get();
-        s_last_click_list = list_half;
-
-        /* Which gesture this was, as the UI understood it. The driver has already
-         * logged the touch itself, so the pair of lines says whether a gesture
-         * that did nothing was not recognised or recognised and then had no
-         * visible effect. */
-        UI_LOGI(TAG, "click %s%s", list_half ? "list" : "face", dbl ? " (double)" : "");
-
-        if (dbl) {
-            /* Cancel the page the first click of this pair left waiting: the pair
-             * means the overlay, and the list should not also move. */
-            if (s_page_timer != NULL) {
-                lv_timer_del(s_page_timer);
-                s_page_timer = NULL;
-            }
-
-            s_doubles++;
-            if (list_half) {
-                ui_companion_on_toggle_overlay();
-            } else {
-                ui_companion_on_switch_view(1);
-            }
-            break;
-        }
-
-        if (list_half) {
-            if (s_page_timer != NULL) {
-                lv_timer_del(s_page_timer);
-            }
-            s_page_timer = lv_timer_create(page_timer_cb, DOUBLE_MS, NULL);
-            lv_timer_set_repeat_count(s_page_timer, 1);
+    case LV_EVENT_SINGLE_CLICKED:
+        if (event_in_list_half(e)) {
+            s_page_due = PAGE_DELAY_TICKS;
         } else {
             ui_companion_on_tap();
         }
         break;
-    }
+
+    case LV_EVENT_DOUBLE_CLICKED:
+        page_delay_cancel();   /* the pair means the overlay, not a page */
+        s_doubles++;
+
+        if (event_in_list_half(e)) {
+            ui_companion_on_toggle_overlay();
+        } else {
+            ui_companion_on_switch_view(1);
+        }
+        break;
+
+    case LV_EVENT_LONG_PRESSED:
+        s_longs++;
+        ui_companion_on_toggle_overlay();
+        break;
+
     default:
         break;
     }
@@ -2000,7 +1983,7 @@ void ui_companion_on_tap(void)
 
 void ui_companion_create(void)
 {
-    lv_obj_t *scr = lv_scr_act();
+    lv_obj_t *scr = lv_screen_active();
     s_scr = scr;
     ui_layout_init(lv_obj_get_width(scr), lv_obj_get_height(scr));
 
@@ -2212,12 +2195,8 @@ void ui_companion_create(void)
 
     /* A rebuilt screen starts on the companion view, page one, no overlay: those
      * pointers all died with the previous screen. */
-    if (s_page_timer != NULL) {
-        lv_timer_del(s_page_timer);   /* it would fire onto the previous screen */
-        s_page_timer = NULL;
-    }
-    s_long_fired      = false;
-    s_have_last_click = false;
+    s_page_due = 0;
+
     s_view            = UI_VIEW_MOOD;
     s_page         = 0;
     s_stats_page   = 0;
@@ -2241,5 +2220,8 @@ void ui_companion_create(void)
      * an internal random countdown (see ui_look_fire). */
     lv_timer_create(ui_look_fire, UI_LOOK_TICK, NULL);
 
-    lv_timer_create(ui_tick, UI_LOOK_TICK, NULL);
+    if (s_ui_timer != NULL) {
+        lv_timer_del(s_ui_timer);   /* the previous screen's timer: its screen is gone */
+    }
+    s_ui_timer = lv_timer_create(ui_tick, UI_LOOK_TICK, NULL);
 }

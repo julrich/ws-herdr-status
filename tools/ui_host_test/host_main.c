@@ -152,14 +152,29 @@ uint32_t ui_device_min_free_heap(void)
 /* Display + pointer input                                             */
 /* ------------------------------------------------------------------ */
 
-static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px_map)
+/* RGB565 -> the RGB888 the framebuffer holds. LVGL 9's lv_color_t is RGB888 while a
+ * 16-bit display's pixels are RGB565, so every pixel makes this trip; the same
+ * helper on the expectation side keeps the two in step. */
+static uint32_t widen565(uint16_t c)
 {
+    const uint32_t r = (c >> 11) & 0x1Fu;
+    const uint32_t g = (c >> 5)  & 0x3Fu;
+    const uint32_t b = c         & 0x1Fu;
+
+    return ((r << 3) << 16) | ((g << 2) << 8) | (b << 3);
+}
+
+static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+{
+    /* The pixels in the flush's byte map are in the display's native format — RGB565
+     * at LV_COLOR_DEPTH 16, the same as the device's buffer. */
+    const uint16_t *px = (const uint16_t *)px_map;
     const int32_t w = lv_area_get_width(area);
     const int32_t h = lv_area_get_height(area);
 
     for(int32_t y = 0; y < h; y++) {
         for(int32_t x = 0; x < w; x++) {
-            const uint32_t rgb = lv_color_to32(px_map[y * w + x]) & 0xFFFFFFu;
+            const uint32_t rgb = widen565(px[y * w + x]);
             const int32_t  fx  = area->x1 + x;
             const int32_t  fy  = area->y1 + y;
             if(fx >= 0 && fx < g_w && fy >= 0 && fy < g_h) {
@@ -167,7 +182,7 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px_m
             }
         }
     }
-    lv_disp_flush_ready(drv);
+    lv_display_flush_ready(disp);
 }
 
 /* Scripted pointer input: no presses unless a scenario posts one. */
@@ -190,13 +205,17 @@ static void render(int iterations);
 
 /* A click at (x, y) through the scripted pointer: press, one tick, release, one
  * tick. A tick is 30 ms of the virtual clock. */
+/* A click through the scripted pointer. LVGL 9 gives every indev its own read timer
+ * (~60 ms in this build) rather than reading at each lv_timer_handler() as v8 did, so
+ * the press has to be held across a read or it is simply never seen. */
 static void click_at(int x, int y)
 {
     post_press(x, y);
-    render(1);                       /* LVGL latches the press */
+    render(3);                       /* 90 ms: at least one read lands on the press */
     post_release();
-    render(1);
+    render(2);
 }
+
 
 /* Two clicks in the same half, 30 ms apart — inside the UI's 350 ms window. */
 static void double_click_at(int x, int y)
@@ -213,9 +232,9 @@ static void double_click_at(int x, int y)
 #define LIST_HALF_X  BODY_CX
 #define LIST_HALF_Y  (SCR_H_HALF + 20)       /* 180: below it */
 
-static void indev_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
+static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
-    (void)drv;
+    (void)indev;
     data->point = g_ptr_pos;
     data->state = g_ptr_state;
 }
@@ -224,30 +243,24 @@ static void harness_init(void)
 {
     lv_init();
 
-    /* lv_disp_drv_register() keeps only the pointer, so the driver structs
-     * have to outlive this call. */
-    static lv_disp_draw_buf_t draw_buf;
-    lv_disp_draw_buf_init(&draw_buf, g_draw_buf, NULL, FB_PIXELS);
-
-    static lv_disp_drv_t disp_drv;
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res  = g_w;
-    disp_drv.ver_res  = g_h;
-    disp_drv.flush_cb = flush_cb;
-    disp_drv.draw_buf = &draw_buf;
-    if(lv_disp_drv_register(&disp_drv) == NULL) {
-        fprintf(stderr, "host: display registration failed\n");
+    /* LVGL 9 dropped the driver structs: a display is created from its size and
+     * configured with setters, and its draw buffer is attached separately. */
+    lv_display_t *disp = lv_display_create(g_w, g_h);
+    if(disp == NULL) {
+        fprintf(stderr, "host: display creation failed\n");
         exit(2);
     }
+    lv_display_set_flush_cb(disp, flush_cb);
+    lv_display_set_buffers(disp, g_draw_buf, NULL, FB_PIXELS * (int)sizeof(lv_color_t),
+                           LV_DISPLAY_RENDER_MODE_PARTIAL);
 
-    static lv_indev_drv_t indev_drv;
-    lv_indev_drv_init(&indev_drv);
-    indev_drv.type    = LV_INDEV_TYPE_POINTER;
-    indev_drv.read_cb = indev_read_cb;
-    if(lv_indev_drv_register(&indev_drv) == NULL) {
-        fprintf(stderr, "host: indev registration failed\n");
+    lv_indev_t *indev = lv_indev_create();
+    if(indev == NULL) {
+        fprintf(stderr, "host: indev creation failed\n");
         exit(2);
     }
+    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(indev, indev_read_cb);
 }
 
 /* Deterministic virtual time: 30 ms per LVGL tick, never wall-clock. */
@@ -266,19 +279,8 @@ static void render(int iterations)
 /* Scenario plumbing                                                   */
 /* ------------------------------------------------------------------ */
 
-/* ui_companion.c owns a 200 ms LVGL timer (lv_timer_create(ui_tick, 200, NULL)).
- * A scenario rebuilds the UI from scratch, so that timer must die with the old
- * widgets or it would keep running against the previous screen. Only that timer
- * matches (period 200, no user data); LVGL's own timers run at 30 ms. */
-static void drop_ui_timers(void)
-{
-    lv_timer_t *t = lv_timer_get_next(NULL);
-    while(t != NULL) {
-        lv_timer_t *next = lv_timer_get_next(t);
-        if(t->period == 200 && t->user_data == NULL) lv_timer_del(t);
-        t = next;
-    }
-}
+/* ui_companion.c deletes its own tick timer when it rebuilds the UI
+ * (LVGL 9 hides the timer struct, and reaching into it was never right). */
 
 /* Fresh display / event state per scenario.
  *
@@ -291,26 +293,23 @@ static void drop_ui_timers(void)
  * The old 200 ms timer is dropped first so nothing can touch the freed
  * widgets in the gap before ui_companion_create() re-points its statics. */
 /* Switch the scene between 172x320 portrait and 320x172 landscape, exactly the
- * way main.c's app_apply_rotation() does it on the device: mutate the driver's
- * resolution and let lv_disp_drv_update() re-lay-out the screens. Must run
- * before reset_scene(), which creates the screen at the new size. */
+ * way main.c's app_apply_rotation() does it on the device: set the display's
+ * resolution and let the screens re-lay-out. Must run before reset_scene(), which
+ * creates the screen at the new size. */
 static void set_scene_geometry(int w, int h)
 {
     g_w = w;
     g_h = h;
 
-    lv_disp_t *disp = lv_disp_get_default();
+    lv_display_t *disp = lv_display_get_default();
     if(disp != NULL) {
-        disp->driver->hor_res = (lv_coord_t)w;
-        disp->driver->ver_res = (lv_coord_t)h;
-        lv_disp_drv_update(disp, disp->driver);
+        lv_display_set_resolution(disp, w, h);
     }
     memset(g_fb, 0, sizeof g_fb);
 }
 
 static void reset_scene(void)
 {
-    drop_ui_timers();
     lv_scr_load_anim(lv_obj_create(NULL), LV_SCR_LOAD_ANIM_NONE, 0, 0, true);
 
     /* Sentinel: no expected palette colour is 0x000000, so an unpainted pixel
@@ -472,7 +471,9 @@ static void failf(result_t *r, const char *fmt, ...)
 /* rgb888 -> the exact RGB888 value LVGL stores after going through RGB565. */
 static uint32_t expect_rgb(uint32_t rgb888)
 {
-    return lv_color_to32(lv_color_hex(rgb888)) & 0xFFFFFFu;
+    /* The display renders RGB565, so an expectation makes the same round trip the
+     * pixel does before it reaches the framebuffer. */
+    return widen565(lv_color_to_u16(lv_color_hex(rgb888)));
 }
 
 static uint32_t pixel_at(int x, int y)
@@ -536,7 +537,7 @@ static lv_obj_t *find_label_rec(lv_obj_t *obj, int y_min, int y_max)
 
 static lv_obj_t *find_label_at(int y_min, int y_max)
 {
-    lv_obj_t *scr = lv_scr_act();
+    lv_obj_t *scr = lv_screen_active();
     if(scr == NULL) return NULL;
     return find_label_rec(scr, y_min, y_max);
 }
@@ -591,7 +592,7 @@ static void band_boxes(lv_obj_t *obj, int y_min, int y_max, lv_area_t *box, int 
  * the gap and the right edge, so a failure says how much has to be trimmed. */
 static bool assert_columns(int y_min, int y_max, int min_gap, char *why, size_t why_sz)
 {
-    lv_obj_t  *scr = lv_scr_act();
+    lv_obj_t  *scr = lv_screen_active();
     lv_area_t  box[4];
     int        n = 0, gap = -1, edge = 0;
 
@@ -619,7 +620,7 @@ static bool assert_columns(int y_min, int y_max, int min_gap, char *why, size_t 
 
 static bool assert_text(int y_min, int y_max, const char *expected, char *got, size_t got_sz)
 {
-    lv_obj_t *scr = lv_scr_act();
+    lv_obj_t *scr = lv_screen_active();
 
     if(scr != NULL && assert_text_in(scr, y_min, y_max, expected)) {
         snprintf(got, got_sz, "%s", expected);
