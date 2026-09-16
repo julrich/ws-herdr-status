@@ -66,6 +66,15 @@ static int g_h = 320;
 /* The face's own features (eyes, mouth, flat mouth) are painted in the screen
  * background colour, so they read as holes cut in the face disc. */
 #define COL_DIM     0x6F7D90
+/* The panel washes, from ui_companion.c: the WORKING and DONE bodies with their chroma
+ * pushed 25%, drawn at TINT_OPA_BUSY; the other moods draw their body at TINT_OPA, and
+ * OFFLINE and SLEEP draw nothing at all. */
+#define COL_WORKING_TINT 0x2292FF
+#define COL_DONE_TINT    0x25DE69
+#define TINT_OPA_BUSY    64
+/* Inside the panel, clear of the face and its ring, of the headline and of the motes. */
+#define PANEL_X 8
+#define PANEL_Y 175
 #define COL_BG      0x0B0F14
 #define COL_FACE    0x0B0F14
 
@@ -453,6 +462,57 @@ static uint32_t pixel_at(int x, int y)
 {
     if(x < 0 || x >= g_w || y < 0 || y >= g_h) return 0xFFFFFFFFu;
     return g_fb[y * g_w + x];
+}
+
+/* ui_companion.c's blend_over_bg(): a wash colour at an opacity over the screen. */
+static uint32_t wash_over_bg(uint32_t rgb888, int opa)
+{
+    const int r = (int)((rgb888 >> 16) & 0xFF), g = (int)((rgb888 >> 8) & 0xFF);
+    const int b = (int)(rgb888 & 0xFF);
+    const int br = (int)((COL_BG >> 16) & 0xFF), bg = (int)((COL_BG >> 8) & 0xFF);
+    const int bb = (int)(COL_BG & 0xFF);
+
+    return (uint32_t)(br + (r - br) * opa / 255) << 16
+         | (uint32_t)(bg + (g - bg) * opa / 255) << 8
+         | (uint32_t)(bb + (b - bb) * opa / 255);
+}
+
+/* Saturation and brightness of a rendered colour, both 0..1000 for comparisons that do
+ * not care about the exact byte LVGL arrives at. */
+static int colour_sat(uint32_t rgb888)
+{
+    const int r = (int)((rgb888 >> 16) & 0xFF), g = (int)((rgb888 >> 8) & 0xFF);
+    const int b = (int)(rgb888 & 0xFF);
+    const int mx = (r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b);
+    const int mn = (r < g) ? ((r < b) ? r : b) : ((g < b) ? g : b);
+
+    return (mx == 0) ? 0 : ((mx - mn) * 1000 / mx);
+}
+
+static int colour_val(uint32_t rgb888)
+{
+    const int r = (int)((rgb888 >> 16) & 0xFF), g = (int)((rgb888 >> 8) & 0xFF);
+    const int b = (int)(rgb888 & 0xFF);
+
+    return ((r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b)) * 1000 / 255;
+}
+
+/* The wash a mood's panel actually renders, against the one the body colour would render
+ * at the old strength. The floor is LVGL's own blend arithmetic in RGB565, so this
+ * compares the two properties that were asked for rather than an exact byte. */
+static void expect_stronger_wash(result_t *r, uint32_t body, const char *mood)
+{
+    const uint32_t panel = pixel_at(PANEL_X, PANEL_Y);
+    const uint32_t old   = expect_rgb(wash_over_bg(body, 46));   /* TINT_OPA */
+
+    EXPECT(r, panel != expect_rgb(COL_BG),
+           "the %s panel has no wash at all (#%06X)", mood, (unsigned)panel);
+    EXPECT(r, colour_sat(panel) > colour_sat(old),
+           "the %s panel is no more saturated than the plain body wash: %d vs %d",
+           mood, colour_sat(panel), colour_sat(old));
+    EXPECT(r, colour_val(panel) > colour_val(old),
+           "the %s panel is no more intense than the plain body wash: %d vs %d",
+           mood, colour_val(panel), colour_val(old));
 }
 
 static bool assert_pixel(int x, int y, uint32_t rgb888)
@@ -988,6 +1048,10 @@ static void check_working(result_t *r)
         char why[64];
         EXPECT(r, assert_bar(true, why, sizeof why), "%s", why);
     }
+
+    /* The panel behind the face takes a more saturated, more intense version of the
+     * mood's body colour, not the body itself. */
+    expect_stronger_wash(r, COL_WORKING, "working");
 }
 
 static void check_done(result_t *r)
@@ -1000,6 +1064,7 @@ static void check_done(result_t *r)
     }
     EXPECT(r, assert_text(HEADLINE_Y_MIN, HEADLINE_Y_MAX, "DONE", got, sizeof got),
            "headline want \"DONE\" got \"%s\"", got);
+    expect_stronger_wash(r, COL_DONE, "done");
 }
 
 static void check_idle(result_t *r)
@@ -1026,6 +1091,12 @@ static void check_empty(result_t *r)
            "headline want \"NO AGENTS\" got \"%s\"", got);
     EXPECT(r, assert_text(SUMMARY_Y_MIN, SUMMARY_Y_MAX, "no agents", got, sizeof got),
            "summary want \"no agents\" got \"%s\"", got);
+
+    /* No wash at all — the same two moods that draw no bar leave the background alone, so
+     * what shows behind the face is the plain screen. */
+    EXPECT(r, assert_pixel(PANEL_X, PANEL_Y, COL_BG),
+           "the no-agents panel is #%06X, not the plain background #%06X",
+           (unsigned)pixel_at(PANEL_X, PANEL_Y), (unsigned)expect_rgb(COL_BG));
 
     /* No agents means nothing for a bar to be about, so the divider goes with them. The
      * burst the mood change started has to be over first: its ripples cross this strip. */
@@ -1054,6 +1125,10 @@ static void check_offline(result_t *r)
         char why[64];
         EXPECT(r, assert_bar(false, why, sizeof why), "%s", why);
     }
+
+    EXPECT(r, assert_pixel(PANEL_X, PANEL_Y, COL_BG),
+           "the offline panel is #%06X, not the plain background #%06X",
+           (unsigned)pixel_at(PANEL_X, PANEL_Y), (unsigned)expect_rgb(COL_BG));
 
     /* The list is cleared while the link is down: whatever the last poll reported is
      * not something the device can still vouch for, and a stale "working" is worse than

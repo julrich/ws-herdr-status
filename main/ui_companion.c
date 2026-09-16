@@ -174,6 +174,18 @@ static void ui_layout_init(lv_coord_t w, lv_coord_t h)
 #define COL_GLINT       0xFFFFFF /* eye highlight: opaque, so pixels match exactly */
 #define COL_SPARKLE     0xDCE7F5 /* ambient motes */
 #define COL_CONFETTI    0xFFF3C4 /* DONE confetti, second colour is COL_SPARKLE */
+/* The panel washes for the two moods that mean work is happening or has happened: the
+ * body colours with their chroma pushed 25% (hue and value untouched), so the screen
+ * behind the face reads as more saturated than the plain body colour does. Paired with
+ * TINT_OPA_BUSY below, which is the other half of "more intense". */
+#define COL_WORKING_TINT 0x2292FF
+#define COL_DONE_TINT    0x25DE69
+
+/* How strong a mood's wash is. "Slightly transparent" by default, so the screen stays
+ * dominant; a little stronger for WORKING and DONE; and nothing at all for OFFLINE and
+ * SLEEP, which draw no bar either — see s_moods. */
+#define TINT_OPA      46
+#define TINT_OPA_BUSY 64
 #define COL_DROP        0x9FD8FF /* sweat */
 #define COL_BLUSH       0xD9736F /* cheek blush */
 
@@ -190,7 +202,10 @@ typedef enum {
 } mood_t;
 
 typedef struct {
-    uint32_t       body;       /* headline colour, and the mood-change tint */
+    uint32_t       body;       /* the mood's colour: headline, bar, ripples, confetti */
+    uint32_t       tint;       /* the panel's wash — the body, or a more saturated
+                                * variant of it for the moods that mean work */
+    lv_opa_t       tint_opa;   /* ...and its strength; 0 draws no wash at all */
     const char    *headline;
     mood_face_t    face;       /* the resting expression */
     mood_face_t    reaction;   /* what a change into this mood plays first */
@@ -213,20 +228,26 @@ static const mood_cfg_t s_moods[MOOD_N] = {
      * that reads right, and a reaction that says what *changed* before the resting
      * expression takes over (see s_face_reaction in ui_tick). */
     [MOOD_BLOCKED] = { .bar = true, .body = COL_BLOCKED, .headline = "NEEDS YOU",
+                       .tint = COL_BLOCKED,            .tint_opa = TINT_OPA,
                        .face = MOOD_FACE_WORRIED,      .reaction = MOOD_FACE_SURPRISED },
     [MOOD_WORKING] = { .bar = true, .body = COL_WORKING, .headline = "WORKING",
+                       .tint = COL_WORKING_TINT,       .tint_opa = TINT_OPA_BUSY,
                        .face = MOOD_FACE_WORKING,      .reaction = MOOD_FACE_COOL,
                        .busy = true, .activity_ms = 1400,
                        .mote_ms = 800, .mote_opa = 255, .mote_rise = 16 },
     [MOOD_DONE]    = { .bar = true, .body = COL_DONE, .headline = "DONE",
+                       .tint = COL_DONE_TINT,          .tint_opa = TINT_OPA_BUSY,
                        .face = MOOD_FACE_HAPPY,        .reaction = MOOD_FACE_EXCITED,
                        .party = true },
     [MOOD_IDLE]    = { .bar = true, .body = COL_IDLE, .headline = "IDLE",
+                       .tint = COL_IDLE,               .tint_opa = TINT_OPA,
                        .face = MOOD_FACE_NEUTRAL,      .reaction = MOOD_FACE_SMIRK },
     [MOOD_SLEEP]   = { .body = COL_SLEEP, .headline = "NO AGENTS", .bar = false,
+                       .tint = COL_SLEEP,              .tint_opa = 0,
                        .face = MOOD_FACE_SLEEPY,       .reaction = MOOD_FACE_SLEEPY,
                        .mote_ms = 3200, .mote_opa = 110, .mote_rise = 26 },
     [MOOD_OFFLINE] = { .body = COL_OFFLINE, .headline = "OFFLINE", .bar = false,
+                       .tint = COL_OFFLINE,            .tint_opa = 0,
                        .face = MOOD_FACE_SAD,          .reaction = MOOD_FACE_CONFUSED },
 };
 
@@ -299,7 +320,6 @@ static uint32_t  s_doubles;
 #define COL_MONEY     0xFFC844   /* every $ figure, here and on the stats page */
 
 #define TINT_H        186    /* ~58% of the panel: down to just above the agent list */
-#define TINT_OPA      46     /* "slightly transparent": the screen stays dominant */
 #define TINT_LUMA_GAP 60     /* how much brighter the text must be than the panel */
 
 #define ACT_X         0      /* the activity bar: full width, docked between the mood
@@ -1234,14 +1254,18 @@ static void ui_apply_mood(mood_t mood)
 
     lv_label_set_text(s_headline, m->headline);
 
-    /* The panel takes the mood's colour, and the headline is chosen against what the
-     * panel actually looks like — not against the screen, which is what the old
-     * colour choice assumed (and what made SLEEP and OFFLINE unreadable). */
-    lv_obj_set_style_bg_color(s_tint, lv_color_hex(m->body), 0);
+    /* The panel takes the mood's wash — and OFFLINE and SLEEP take none at all, the same
+     * two moods that draw no bar: there is no work in them for a background to be about,
+     * so they get the plain screen. The headline is then chosen against what the panel
+     * actually looks like, which without a wash is that screen — not against the mood's
+     * colour, which is what the old choice assumed and what made SLEEP and OFFLINE
+     * unreadable. */
+    lv_obj_set_style_bg_color(s_tint, lv_color_hex(m->tint), 0);
+    lv_obj_set_style_bg_opa(s_tint, m->tint_opa, 0);
 
-    const uint32_t panel = blend_over_bg(m->body, TINT_OPA);
-    const uint32_t ink   = (colour_luma(m->body) > colour_luma(panel) + TINT_LUMA_GAP)
-                           ? m->body : COL_TEXT;
+    const uint32_t panel = (m->tint_opa != 0) ? blend_over_bg(m->tint, m->tint_opa) : COL_BG;
+    const uint32_t ink   = (colour_luma(m->tint) > colour_luma(panel) + TINT_LUMA_GAP)
+                           ? m->tint : COL_TEXT;
 
     lv_obj_set_style_text_color(s_headline, lv_color_hex(ink), 0);
 
@@ -1713,7 +1737,7 @@ void ui_companion_create(void)
     make_passive(s_tint);
     lv_obj_set_size(s_tint, SCR_W, TINT_H);
     lv_obj_set_pos(s_tint, 0, 0);
-    lv_obj_set_style_bg_opa(s_tint, TINT_OPA, 0);
+    lv_obj_set_style_bg_opa(s_tint, LV_OPA_TRANSP, 0);   /* ui_apply_mood sets the mood's */
     lv_obj_set_style_border_width(s_tint, 0, 0);
     lv_obj_set_style_radius(s_tint, 0, 0);
     lv_obj_set_style_pad_all(s_tint, 0, 0);

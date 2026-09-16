@@ -811,6 +811,17 @@ the poll cadence is `CONFIG_HERDR_POLL_PERIOD_MS` + one GET (~250 ms).
 Everything the face does is `lv_anim` + two `lv_timer`s, all in
 `main/ui_companion.c`:
 
+- **Each mood carries its own wash** (`.tint` / `.tint_opa` in `s_moods`). The two moods
+  that draw no bar — OFFLINE and SLEEP — draw no wash either, so they show the plain
+  screen, and the headline is then coloured against the panel that actually results:
+  `blend_over_bg()` of the wash, or `COL_BG` when there is none (that is the rule that
+  keeps those two readable; picking against the mood colour made them unreadable).
+  WORKING and DONE use `COL_WORKING_TINT` / `COL_DONE_TINT` — the body colour with its
+  chroma pushed 25%, hue and value untouched — at `TINT_OPA_BUSY` (64) rather than
+  `TINT_OPA` (46), so their backgrounds read as more saturated *and* more intense than
+  the plain body wash. `check_working` / `check_done` assert that pair of properties,
+  measured off the rendered pixel, because the exact byte is LVGL's own blend in RGB565
+  and not something this file can predict.
 - **The bar's highlight is a wrapping window, not a travelling block.** Two objects
   `ACT_HL_W` wide, both children of the bar — LVGL clips a child to its parent, so the
   bar itself cuts them off at either end — and the second kept exactly one bar width
