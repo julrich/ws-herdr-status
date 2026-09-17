@@ -23,6 +23,7 @@ Usage:
 """
 
 import argparse
+import collections
 import json
 import os
 import socket
@@ -244,6 +245,19 @@ def _token_count(v):
     return int(v)
 
 
+# How many recent turns the tokens-per-second figure covers. omp reports a rate over
+# its current turn; a few of them together is steadier and still its own numbers.
+TOK_S_WINDOW = 4
+
+
+def _tokens_per_second(recent):
+    """Output tokens per second over the last few turns, or 0 without timing."""
+    tokens = sum(n for n, _ in recent)
+    ms = sum(ms for _, ms in recent)
+
+    return int(round(tokens * 1000.0 / ms)) if ms > 0 else 0
+
+
 class SessionTail:
     """Incremental parser state for one omp session log.
 
@@ -269,6 +283,10 @@ class SessionTail:
         # accumulates and rounded once on the way out (the wire carries integer
         # micro-dollars, so the device never has to do float arithmetic).
         self.cost_usd = 0.0
+        # The last few turns' (output tokens, milliseconds), for tokens per second:
+        # omp writes both numbers per message, so this is its figure, not one the
+        # device would have to invent from successive polls.
+        self.recent = collections.deque(maxlen=TOK_S_WINDOW)
         self.model = ""
         self.mtime = 0.0
 
@@ -286,6 +304,7 @@ class SessionTail:
             self.calls = 0
             self.messages = 0
             self.cost_usd = 0.0
+            self.recent.clear()
             self.model = ""
         if st.st_size > self.offset:
             with open(self.path, "rb") as fh:
@@ -346,6 +365,11 @@ class SessionTail:
                 total = cost.get("total")
                 if isinstance(total, (int, float)):
                     self.cost_usd += float(total)
+            # omp's own timing for this turn: the message carries how long it took and
+            # how many tokens it produced.
+            duration = message.get("duration")
+            if isinstance(duration, (int, float)) and duration > 0:
+                self.recent.append((_token_count(usage.get("output")), float(duration)))
             model = message.get("model")
             if isinstance(model, str) and model:
                 self.model = model  # last one wins: the model the session is on now
@@ -408,6 +432,10 @@ class StatsStore:
                     # Integer micro-dollars: 1_000_000 == $1, so the device can print
                     # two decimals with integer arithmetic and no rounding drift.
                     "cost_micro": int(round(tail.cost_usd * 1000000)),
+                    # Output tokens per second over the last few turns. omp writes both
+                    # numbers per message, so this is its own figure rather than one the
+                    # device would have to invent from successive polls.
+                    "tok_s": _tokens_per_second(tail.recent),
                 }
             )
 

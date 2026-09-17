@@ -10,7 +10,7 @@
  * into the shared herdr_status_t. */
 void herdr_client_start(void);
 
-/* Link counters for the diagnostics overlay (main/ui_stats.h): `gen` and
+/* Link counters for the stats view's device page (main/ui_stats.h): `gen` and
  * `online` are the last published poll, the rest are running totals from the
  * poll task. Callable at any time, including before herdr_client_start(). */
 void herdr_client_stats(herdr_link_stats_t *out);

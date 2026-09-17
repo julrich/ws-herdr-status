@@ -664,12 +664,21 @@ is ever wanted again, two things measured while it was:
 
 - **LVGL owns the input path, and the vocabulary is positional.** The panel is
   single-touch (§7), so the port's own pointer indev is enough; `ui_companion.c`'s
-  `screen_event_cb` reads `LV_EVENT_SINGLE_CLICKED`, `LV_EVENT_DOUBLE_CLICKED` and
-  `LV_EVENT_LONG_PRESSED` and nothing else. LVGL 9 classifies single and double
-  clicks itself, inside the long-press time, which is less code and less guesswork
-  than the hand-rolled window this used to carry — and it means **a long press sends
-  no click at all**, so a hold cannot also read as a tap and there is nothing to
-  suppress. Note that **`lv_event_get_indev()` is NULL for these events**: the indev
+  `screen_event_cb` handles `LV_EVENT_SINGLE_CLICKED`, `LV_EVENT_DOUBLE_CLICKED`,
+  `LV_EVENT_TRIPLE_CLICKED` and `LV_EVENT_LONG_PRESSED`. Three things there are worth
+  not re-learning:
+
+  - **A third tap of a run arrives as `TRIPLE_CLICKED`**, not as another SINGLE: LVGL
+    counts the streak (1 → single, 2 → double, 3 → triple). Leaving it unhandled
+    silently loses a tap the user made — it cost a page in the paging scenario.
+  - **Our own reading of the pair is still needed.** LVGL calls two taps a double only
+    when they fall inside its own movement limit, which a thumb on this panel rarely
+    manages, so the handler also pairs two `SINGLE_CLICKED` events itself (600 ms,
+    40 px apart at most).
+  - **A long press sends no click at all**, so a hold cannot also read as a tap and
+    there is nothing to suppress.
+
+  Note that **`lv_event_get_indev()` is NULL for these events**: the indev
   arrives as the event's *parameter* (`lv_event_get_param`), which is how the half is
   worked out. There is no input task, no gesture recogniser of our own, and no
   `lvgl_port_remove_touch` — that whole path existed only to read a second point
@@ -678,34 +687,55 @@ is ever wanted again, two things measured while it was:
   they were the least reliable input on this panel: a drag that LVGL reads as a
   gesture *also suppresses the click*, so a swipe that fell short did nothing at
   all, and one that ran on into the wrong object did the wrong thing. The screen
-  is small enough to reach every corner, so input is a tap or a double tap in one
-  of two halves:
+  is small enough to reach every corner, so input is a tap in one of two halves, a
+  hold anywhere, and a double tap that is the hold's unreliable twin:
 
   | input | action |
   |---|---|
   | tap, the face's half | refresh from the bridge + the mood's flourish |
   | tap, the list's half | forward a page (agent list, or the stats page) |
   | double tap, the face's half | the other view (mood ↔ stats) |
-  | double tap, the list's half | the diagnostics overlay |
-  | hold, anywhere | the overlay too |
+  | hold, anywhere | the other view too, and nothing else |
+
+  **The hold is the one that has to work.** A double tap needs both taps inside
+  LVGL's own limits, which a thumb on a 172 px panel manages only sometimes, so the
+  gesture that matters is carried by the hold and the double is the bonus. The hold
+  used to raise a diagnostics overlay instead, and a double tap of the list's half
+  was its other door; both are gone, because the stats view's second page already
+  carries the link and device figures. Only the heap low-water mark went with it.
 
 - The halves are **equal halves of the long side**, and the artwork keeps its roles
   in the layout `ui_layout_init` sets out: the face occupies the top half and the
   list the bottom, so "the face's half" is always the top one. There is no other
   orientation — see "Orientation: there isn't one".
-- Two asymmetries are deliberate. The **face's tap is immediate** — it is the one
-  that wants feedback, and its double (the view switch) is orthogonal, so both may
-  happen on a double. The **list's tap is deferred by `PAGE_DELAY_TICKS`** (three of
-  `ui_tick`'s 200 ms beats, ~600 ms) and cancelled by a double: paging is not
-  orthogonal to the overlay, so paging first and undoing it flickers through a page
-  nobody asked for. Anything delaying the *face* by that much would read as a laggy
-  poke, which is why it is not uniform.
-- **The page delay is counted in `ui_tick` beats, not in a one-shot `lv_timer`.**
-  Under LVGL 9 a timer created from inside the event callback never fired (measured:
-  the page simply never happened), and the delay has to outlast LVGL's own
-  double-click classification anyway. Three beats is comfortably clear of it.
-- The harness asserts the click rules by counting bridge polls: `0` after a long
-  press, `1` after a tap or a double tap (a double is a tap plus its second click).
+- **The list is cleared when the link is down.** Every row (dot, label and figure) is
+  hidden while `!online`, because what the last poll reported is not something the
+  device can still vouch for and a stale "working" is worse than a blank; the headline
+  and the summary already say why the screen is empty. Paging is refused with it, and
+  the page index resets on the mood change to OFFLINE so the list comes back on its
+  first page. `check_offline` asserts both halves of that — absent while offline, back
+  once the link is restored — so it stays a render's decision rather than a one-way
+  clearing of the data the poller keeps.
+- The **face's tap is immediate** — it is the one that wants feedback, and its double
+  (the view switch) is orthogonal, so both may happen on a double. The **list's tap
+  pages on the tap itself**: the three-beat delay it used to carry existed only so a
+  double tap there could cancel it, and with the overlay gone there is no double on
+  the list to wait for. A second tap there is simply a second page.
+- **The harness clears its framebuffer before each scenario** and invalidates the whole
+  screen, because nothing else ever does: a screen only paints the pixels it covers, so
+  without it a scenario reads whatever the previous one left behind. That is not
+  hypothetical — it made the bar's highlight measure 188 px while the animation had it
+  off-screen, and it would flake any assertion of the form "nothing is drawn here".
+- The harness asserts the click rules by counting bridge polls: `0` after a hold, `1`
+  after a tap or a double tap (a double is a tap plus its second click) — and the hold
+  scenario asserts the view it lands on, in both directions.
+- **Two thresholds on the device's indev are tuned for a finger.** LVGL classifies a
+  double click itself, but only when the two taps fall within `scroll_limit` of each
+  other — 10 px by default, which a thumb on a 172 px panel rarely manages, so the
+  double never registered on the panel while the harness (which tapped one exact
+  pixel) always passed. `main.c` sets `scroll_limit` 40 px and `long_press_time`
+  600 ms; the harness sets the same, and `double_click_apart()` taps two points to
+  keep it honest.
 - The screen carries `LV_OBJ_FLAG_CLICKABLE`; the view containers above it stay
   `make_passive`d, so the press is delivered to the screen. `ui_companion_create`
   owns the `ui_tick` timer and deletes the previous one, so a UI rebuild never
@@ -715,9 +745,6 @@ is ever wanted again, two things measured while it was:
   switching is one hidden flag. Do not turn them into separate LVGL screens:
   main.c's rebuild path auto-deletes the old screen, so a second screen's stored
   pointer would dangle.
-- The diagnostics overlay is created on demand and deleted on the next long
-  press; `ui_companion_create()` clears those pointers because they die with the
-  screen.
 - **The stats view is a two-column table**, sessions first: a header and three
   totals lines, then one row per agent (a state-coloured dot, the label with its
   token count, and the cost right-aligned), and the link/device page behind it. Each
@@ -784,6 +811,43 @@ the poll cadence is `CONFIG_HERDR_POLL_PERIOD_MS` + one GET (~250 ms).
 Everything the face does is `lv_anim` + two `lv_timer`s, all in
 `main/ui_companion.c`:
 
+- **The panel's foot** carries two sums over the agents *in the list* — not the bridge's
+  totals, which also count sessions herdr no longer reports: `check_live_rows` asserts the
+  difference, $12.60 of rows against the $12.75 the stats page shows. Bottom-left in
+  `COL_MONEY` is the spend; bottom-right in `COL_RATE` is the summed rate, which only
+  exists in WORKING and only when an agent reports one. Both sit at `(TOTAL_X, TOTAL_Y)` =
+  (6, 169), a few pixels in from the screen's edge and above the bar, and both are hidden
+  when the mood shows no list — the same `m->bar` flag that governs the bar and the wash,
+  because `count == 0` alone is not enough: an offline device still holds the last list it
+  received and the last `/stats` snapshot, and a spend summed over agents the device
+  cannot vouch for is exactly what should not be on screen. (The harness's `offline`
+  payload carries session figures on purpose, so that case is covered rather than being
+  masked by a missing `/stats` answer.) The rate is additionally hidden unless the mood is
+  WORKING, and both go when there is no `/stats` answer at all. They are created last in the mood container so the mood-change rings draw
+  under them, which is why the harness's ring probe stops at y=167 and its wash probe is
+  at y=150 — both bands have to stay clear of the foot.
+- **Each mood carries its own wash** (`.tint` / `.tint_opa` in `s_moods`). The two moods
+  that draw no bar — OFFLINE and SLEEP — draw no wash either, so they show the plain
+  screen, and the headline is then coloured against the panel that actually results:
+  `blend_over_bg()` of the wash, or `COL_BG` when there is none (that is the rule that
+  keeps those two readable; picking against the mood colour made them unreadable).
+  WORKING and DONE use `COL_WORKING_TINT` / `COL_DONE_TINT` — the body colour with its
+  chroma pushed 25%, hue and value untouched — at `TINT_OPA_BUSY` (64) rather than
+  `TINT_OPA` (46), so their backgrounds read as more saturated *and* more intense than
+  the plain body wash. `check_working` / `check_done` assert that pair of properties,
+  measured off the rendered pixel, because the exact byte is LVGL's own blend in RGB565
+  and not something this file can predict.
+- **The bar's highlight is a wrapping window, not a travelling block.** Two objects
+  `ACT_HL_W` wide, both children of the bar — LVGL clips a child to its parent, so the
+  bar itself cuts them off at either end — and the second kept exactly one bar width
+  behind the first. That offset is the whole trick: as one window leaves on the right the
+  other arrives on the left, so the highlighted *length* never changes and the highlight
+  never appears or vanishes at an end (it used to pop in at full width and pop out).
+  It runs as two animations chained through a completed callback: an entry (`-ACT_HL_W`
+  to 0, at the same speed, so it takes `ACT_HL_W/ACT_W` of a lap), then laps of `0` to
+  `ACT_W` repeating. **`activity_ms` is now the time of one lap of the bar**, where it
+  used to be the time to cross all but the last window's width — so the same value is
+  ~30% faster than it was; the mood table's numbers were not retuned.
 - **One animation per property per mood.** `ui_apply_mood()` deletes each
   animation before restarting its replacement, and the mood table
   (`mood_cfg_t`) hands out one period/amplitude per feature. The properties in

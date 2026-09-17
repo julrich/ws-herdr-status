@@ -1,9 +1,8 @@
-/* Data contract for the diagnostics overlay and the stats view.
+/* Data contract for the stats view's link and device page.
  *
  * Free of esp_* and LVGL on purpose: main/ui_companion.c reads these structs to
- * render both screens, and it is compiled on the host by tools/ui_host_test
- * (AGENTS.md §9a), which stubs the three getters the way it already stubs
- * herdr_client_get().
+ * render it, and it is compiled on the host by tools/ui_host_test (AGENTS.md §9a),
+ * which stubs the getters the way it already stubs herdr_client_get().
  *
  * Producers:
  *   - herdr_client_stats()   — the HTTP poller            (main/herdr_client.c)
@@ -23,9 +22,7 @@ typedef struct {
     bool     online;      /* last poll succeeded and the wire is not stale */
 } herdr_link_stats_t;
 
-/* Free heap in bytes, and its low-water mark since boot. 0 where the platform
- * does not provide them (the host harness), which the overlay renders as n/a. */
+/* Free heap in bytes. 0 where the platform does not provide it (the host harness). */
 uint32_t ui_device_free_heap(void);
-uint32_t ui_device_min_free_heap(void);
 
 void herdr_client_stats(herdr_link_stats_t *out);

@@ -34,9 +34,14 @@
 
 /* portrait (matches ui_layout_init's !split branch) */
 #define BODY_CX 86
-#define BODY_CY 108
+#define BODY_CY 108       /* the face's box centre, as ui_companion.c places it */
 #define BODY_D  120
 #define LIST_Y0 190      /* portrait list geometry, from ui_layout_init() */
+#define BAR_Y   186      /* the divider between the panel and the list (TINT_H) */
+#define BAR_H   5
+#define BAR_HL_W 40      /* the highlighted window (ACT_HL_W) */
+#define TOTAL_Y  169     /* the panel's foot: the list's spend and rate (TOTAL_Y) */
+#define BAR_LAP_MS 1400  /* one lap of the bar: the WORKING mood's activity_ms */
 #define LIST_ROW_H 24
 #define RING_D  138
 #define MOUTH_CY 126
@@ -61,6 +66,17 @@ static int g_h = 320;
 #define COL_OFFLINE 0x2A3442
 /* The face's own features (eyes, mouth, flat mouth) are painted in the screen
  * background colour, so they read as holes cut in the face disc. */
+#define COL_DIM     0x6F7D90
+/* The panel washes, from ui_companion.c: the WORKING and DONE bodies with their chroma
+ * pushed 25%, drawn at TINT_OPA_BUSY; the other moods draw their body at TINT_OPA, and
+ * OFFLINE and SLEEP draw nothing at all. */
+#define COL_WORKING_TINT 0x2292FF
+#define COL_DONE_TINT    0x25DE69
+#define TINT_OPA_BUSY    64
+/* Inside the panel, clear of the face and its ring, of the headline, of the motes and of
+ * the panel's own foot (which starts at TOTAL_Y). */
+#define PANEL_X 8
+#define PANEL_Y 150
 #define COL_BG      0x0B0F14
 #define COL_FACE    0x0B0F14
 
@@ -128,11 +144,6 @@ bool herdr_stats_get(herdr_sessions_t *out)
 uint32_t ui_device_free_heap(void)
 {
     return 180u * 1024u;
-}
-
-uint32_t ui_device_min_free_heap(void)
-{
-    return 150u * 1024u;
 }
 
 /* ------------------------------------------------------------------ */
@@ -204,11 +215,22 @@ static void click_at(int x, int y)
 }
 
 
-/* Two clicks in the same half, 30 ms apart — inside the UI's 350 ms window. */
+/* Two clicks in the same half, 30 ms apart — inside the UI's double window. */
 static void double_click_at(int x, int y)
 {
     click_at(x, y);
     click_at(x, y);
+}
+
+/* A double tap as a finger does it: two taps in the same half, but not on the same
+ * pixel. The harness used to only ever tap one point, which hid a device bug: LVGL
+ * resets its double-click detection when the taps are further apart than the indev's
+ * scroll_limit, so a real double never registered and the stats view was unreachable
+ * on the panel. */
+static void double_click_apart(int x, int y)
+{
+    click_at(x, y);
+    click_at(x + 18, y + 22);
 }
 
 /* The two halves: the face keeps the first half along the long axis, the list the
@@ -248,6 +270,11 @@ static void harness_init(void)
     }
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, indev_read_cb);
+    /* The same two thresholds main.c sets on the device's indev (see the comment
+     * there): without them a double tap only counts when it lands in the same
+     * 10 px, which is why the device could not open the stats view. */
+    lv_indev_set_scroll_limit(indev, 40);
+    lv_indev_set_long_press_time(indev, 600);
 }
 
 /* Deterministic virtual time: 30 ms per LVGL tick, never wall-clock. */
@@ -319,7 +346,8 @@ static void load_scenario(const char *name)
     else if(strcmp(name, "working") == 0 || strcmp(name, "alive") == 0 || strcmp(name, "glint") == 0
             || strcmp(name, "motes") == 0
             || strcmp(name, "land_working") == 0
-            || strcmp(name, "view_switch") == 0 || strcmp(name, "overlay") == 0
+            || strcmp(name, "view_switch") == 0 || strcmp(name, "hold") == 0
+            || strcmp(name, "bar") == 0
             || strcmp(name, "flourish") == 0) {
         set_agent(0, "PoC", "omp", HERDR_ST_WORKING, true);
         set_agent(1, "Docs pass", "claude", HERDR_ST_IDLE, false);
@@ -329,7 +357,7 @@ static void load_scenario(const char *name)
         set_agent(0, "Finished review", "omp", HERDR_ST_DONE, false);
         g_status.count = 1;
     }
-    else if(strcmp(name, "stats") == 0) {
+    else if(strcmp(name, "stats") == 0 || strcmp(name, "live_rows") == 0) {
         /* The desk's real agents and their real /stats numbers, which is where the
          * formatting questions came from (four sessions, 1.1G input tokens between
          * them, one session quiet overnight). */
@@ -362,6 +390,7 @@ static void load_scenario(const char *name)
             g_sessions.per[i].messages   = live[i].msgs;
             g_sessions.per[i].age_s      = live[i].age;
             g_sessions.per[i].cost_micro = live[i].cost;
+            g_sessions.per[i].tokens_per_s = 85;   /* what the bridge reports */
             snprintf(g_sessions.per[i].model, sizeof g_sessions.per[i].model, "deepseek-v4.1-f");
         }
     }
@@ -372,11 +401,23 @@ static void load_scenario(const char *name)
     else if(strcmp(name, "empty") == 0 || strcmp(name, "sleep_z") == 0 || strcmp(name, "land_empty") == 0) {
         g_status.count = 0;
     }
-    else if(strcmp(name, "offline") == 0) {
-        set_agent(0, "PoC", "omp", HERDR_ST_WORKING, true);
-        set_agent(1, "Docs pass", "claude", HERDR_ST_IDLE, false);
-        g_status.count  = 2;
-        g_status.online = false;
+    else if(strcmp(name, "offline") == 0 || strcmp(name, "empty") == 0) {
+        /* The offline scenario carries session figures on purpose: the device holds the
+         * last /stats snapshot it read, so "no spend while offline" has to survive a
+         * /stats answer that is there but stale. `empty` is the same for SLEEP. */
+        if(strcmp(name, "offline") == 0) {
+            set_agent(0, "PoC", "omp", HERDR_ST_WORKING, true);
+            set_agent(1, "Docs pass", "claude", HERDR_ST_IDLE, false);
+            g_status.count  = 2;
+            g_status.online = false;
+        }
+
+        g_sessions.valid      = true;
+        g_sessions.sessions   = 1;
+        g_sessions.cost_micro = 4564666u;   /* $4.56, stale */
+        g_sessions.per[0].cost_micro    = 4564666u;
+        g_sessions.per[0].tokens_per_s  = 120;
+        snprintf(g_sessions.per[0].model, sizeof g_sessions.per[0].model, "deepseek-v4.1-f");
     }
     else if(strcmp(name, "overflow") == 0 || strcmp(name, "paging") == 0) {
         static const char *labels[HERDR_MAX_AGENTS] = {
@@ -435,6 +476,57 @@ static uint32_t pixel_at(int x, int y)
 {
     if(x < 0 || x >= g_w || y < 0 || y >= g_h) return 0xFFFFFFFFu;
     return g_fb[y * g_w + x];
+}
+
+/* ui_companion.c's blend_over_bg(): a wash colour at an opacity over the screen. */
+static uint32_t wash_over_bg(uint32_t rgb888, int opa)
+{
+    const int r = (int)((rgb888 >> 16) & 0xFF), g = (int)((rgb888 >> 8) & 0xFF);
+    const int b = (int)(rgb888 & 0xFF);
+    const int br = (int)((COL_BG >> 16) & 0xFF), bg = (int)((COL_BG >> 8) & 0xFF);
+    const int bb = (int)(COL_BG & 0xFF);
+
+    return (uint32_t)(br + (r - br) * opa / 255) << 16
+         | (uint32_t)(bg + (g - bg) * opa / 255) << 8
+         | (uint32_t)(bb + (b - bb) * opa / 255);
+}
+
+/* Saturation and brightness of a rendered colour, both 0..1000 for comparisons that do
+ * not care about the exact byte LVGL arrives at. */
+static int colour_sat(uint32_t rgb888)
+{
+    const int r = (int)((rgb888 >> 16) & 0xFF), g = (int)((rgb888 >> 8) & 0xFF);
+    const int b = (int)(rgb888 & 0xFF);
+    const int mx = (r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b);
+    const int mn = (r < g) ? ((r < b) ? r : b) : ((g < b) ? g : b);
+
+    return (mx == 0) ? 0 : ((mx - mn) * 1000 / mx);
+}
+
+static int colour_val(uint32_t rgb888)
+{
+    const int r = (int)((rgb888 >> 16) & 0xFF), g = (int)((rgb888 >> 8) & 0xFF);
+    const int b = (int)(rgb888 & 0xFF);
+
+    return ((r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b)) * 1000 / 255;
+}
+
+/* The wash a mood's panel actually renders, against the one the body colour would render
+ * at the old strength. The floor is LVGL's own blend arithmetic in RGB565, so this
+ * compares the two properties that were asked for rather than an exact byte. */
+static void expect_stronger_wash(result_t *r, uint32_t body, const char *mood)
+{
+    const uint32_t panel = pixel_at(PANEL_X, PANEL_Y);
+    const uint32_t old   = expect_rgb(wash_over_bg(body, 46));   /* TINT_OPA */
+
+    EXPECT(r, panel != expect_rgb(COL_BG),
+           "the %s panel has no wash at all (#%06X)", mood, (unsigned)panel);
+    EXPECT(r, colour_sat(panel) > colour_sat(old),
+           "the %s panel is no more saturated than the plain body wash: %d vs %d",
+           mood, colour_sat(panel), colour_sat(old));
+    EXPECT(r, colour_val(panel) > colour_val(old),
+           "the %s panel is no more intense than the plain body wash: %d vs %d",
+           mood, colour_val(panel), colour_val(old));
 }
 
 static bool assert_pixel(int x, int y, uint32_t rgb888)
@@ -509,7 +601,9 @@ static int face_ink(void)
 {
     const int      x0 = BODY_CX - BODY_D / 2, x1 = BODY_CX + BODY_D / 2;
     const int      y0 = BODY_CY - BODY_D / 2, y1 = BODY_CY + BODY_D / 2;
-    const uint32_t bg = expect_rgb(COL_BG);
+    /* The box's own corner is the mood panel behind the face, whatever colour that
+     * is this mood: ink is what differs from it. */
+    const uint32_t bg = pixel_at(x0, y0);
     int            n  = 0;
 
     for(int y = y0; y <= y1; y++) {
@@ -613,6 +707,55 @@ static bool assert_text(int y_min, int y_max, const char *expected, char *got, s
     const char *txt = (lbl != NULL) ? lv_label_get_text(lbl) : NULL;
     if(txt == NULL) txt = "(no label)";
     snprintf(got, got_sz, "%s", txt);
+    return false;
+}
+
+/* The colour a label is actually drawn in, found by the text it carries. The row's
+ * figures are specified colours, so this is a behaviour, not an implementation detail —
+ * and it is the only way to catch a later style write undoing one (which happened). */
+static bool label_colour_in(lv_obj_t *obj, const char *text, uint32_t rgb888)
+{
+    uint32_t n = lv_obj_get_child_cnt(obj);
+
+    for(uint32_t i = 0; i < n; i++) {
+        lv_obj_t *child = lv_obj_get_child(obj, (int32_t)i);
+        if(child == NULL) continue;
+
+        if(lv_obj_check_type(child, &lv_label_class) && obj_is_visible(child) &&
+           strcmp(lv_label_get_text(child), text) == 0) {
+            const lv_color_t c = lv_obj_get_style_text_color(child, LV_PART_MAIN);
+            return lv_color_to_int(c) == (int)(rgb888 & 0xFFFFFFu);
+        }
+        if(label_colour_in(child, text, rgb888)) return true;
+    }
+    return false;
+}
+
+/* Suffix match over every label in the band: a row holds both its name and its status
+ * figure, and which of them comes first is not the check's business. */
+static bool assert_text_suffix_in(lv_obj_t *obj, int y_min, int y_max, const char *suffix)
+{
+    uint32_t n = lv_obj_get_child_cnt(obj);
+
+    for(uint32_t i = 0; i < n; i++) {
+        lv_obj_t *child = lv_obj_get_child(obj, (int32_t)i);
+        if(child == NULL) continue;
+
+        if(lv_obj_check_type(child, &lv_label_class) && obj_is_visible(child)) {
+            lv_area_t   a;
+            const char *t;
+            size_t      tl, sl;
+
+            lv_obj_get_coords(child, &a);
+            t  = lv_label_get_text(child);
+            tl = strlen(t);
+            sl = strlen(suffix);
+            if(a.y1 >= y_min && a.y1 <= y_max && tl >= sl && strcmp(t + tl - sl, suffix) == 0) {
+                return true;
+            }
+        }
+        if(assert_text_suffix_in(child, y_min, y_max, suffix)) return true;
+    }
     return false;
 }
 
@@ -721,18 +864,30 @@ static bool band_has_ink(int x0, int x1, int y0, int y1)
     return false;
 }
 
-/* Bright pixels in the strip below the face. y starts at 172 because the
- * breathing face's bottom edge reaches ~168 at its widest radius, and y 190 is
- * where the agent rows begin; x 20..152 is inside the washer's reach, so at rest
- * this strip is pure background and only a burst ring can light it up. */
+/* Bright pixels in the strip below the face: from just under its box (the face is
+ * 100 px across and centred at BODY_CY, so its bottom edge is ~146) down to the mood
+ * panel's edge at 186, clear of the agent rows that start at 190. At rest this strip
+ * shows the panel and nothing else, and only a burst ring can light it up — the mood
+ * in this scenario has no motes, which are the other thing that lives down here. */
 static int bright_pixels_below_face(int threshold)
 {
-    int n = 0;
+    /* The strip is inside the mood panel, which is itself bright in this mood's
+     * colour, so the baseline is what the strip looks like without a ring — sampled
+     * at its corner, away from where the washer crosses: the strip sits between the
+     * face's box (which ends at ~161) and the activity bar at 186. */
+    /* 164..167: the strip immediately under the face's box, kept clear of the panel's own
+     * foot, which is drawn at 169 and would be counted here otherwise. A ring is a wide arc
+     * and still crosses it. */
+    const uint32_t base = pixel_at(20, 164);
+    int            n    = 0;
 
-    for(int y = 172; y <= 188; y++) {
+    for(int y = 164; y <= 167; y++) {
         for(int x = 20; x <= 152; x++) {
-            uint32_t c = pixel_at(x, y);
-            int      r = (int)((c >> 16) & 0xFF), g = (int)((c >> 8) & 0xFF), b = (int)(c & 0xFF);
+            const uint32_t c = pixel_at(x, y);
+
+            if(c == base) continue;
+
+            int r = (int)((c >> 16) & 0xFF), g = (int)((c >> 8) & 0xFF), b = (int)(c & 0xFF);
             if(r > threshold || g > threshold || b > threshold) n++;
         }
     }
@@ -752,6 +907,21 @@ static int count_exact(uint32_t rgb888, int x0, int x1, int y0, int y1)
         }
     }
     return n;
+}
+
+/* The divider between the panel and the list. It is drawn as a solid track in the dim
+ * colour, so "drawn" is a pixel count and "not drawn" is none at all — an absence no
+ * blend of the burst's ripples can fake, since those never land on an exact colour. */
+static bool assert_bar(bool want, char *why, size_t why_sz)
+{
+    /* The middle three rows of the track: clear of the list's first row below it. */
+    const int n = count_exact(COL_DIM, 0, g_w - 1, BAR_Y + 1, BAR_Y + BAR_H - 2);
+
+    if((n > 0) != want) {
+        snprintf(why, why_sz, "the divider is %s (%d track px)", n > 0 ? "drawn" : "missing", n);
+        return false;
+    }
+    return true;
 }
 
 /* Pixels leaning warm by at least delta on the red channel (cheek blush). */
@@ -889,6 +1059,16 @@ static void check_working(result_t *r)
     }
     EXPECT(r, assert_text(HEADLINE_Y_MIN, HEADLINE_Y_MAX, "WORKING", got, sizeof got),
            "headline want \"WORKING\" got \"%s\"", got);
+
+    /* An agent is running, so the divider between the panel and the list is drawn. */
+    {
+        char why[64];
+        EXPECT(r, assert_bar(true, why, sizeof why), "%s", why);
+    }
+
+    /* The panel behind the face takes a more saturated, more intense version of the
+     * mood's body colour, not the body itself. */
+    expect_stronger_wash(r, COL_WORKING, "working");
 }
 
 static void check_done(result_t *r)
@@ -901,6 +1081,7 @@ static void check_done(result_t *r)
     }
     EXPECT(r, assert_text(HEADLINE_Y_MIN, HEADLINE_Y_MAX, "DONE", got, sizeof got),
            "headline want \"DONE\" got \"%s\"", got);
+    expect_stronger_wash(r, COL_DONE, "done");
 }
 
 static void check_idle(result_t *r)
@@ -927,6 +1108,26 @@ static void check_empty(result_t *r)
            "headline want \"NO AGENTS\" got \"%s\"", got);
     EXPECT(r, assert_text(SUMMARY_Y_MIN, SUMMARY_Y_MAX, "no agents", got, sizeof got),
            "summary want \"no agents\" got \"%s\"", got);
+
+    /* No wash at all — the same two moods that draw no bar leave the background alone, so
+     * what shows behind the face is the plain screen. */
+    EXPECT(r, assert_pixel(PANEL_X, PANEL_Y, COL_BG),
+           "the no-agents panel is #%06X, not the plain background #%06X",
+           (unsigned)pixel_at(PANEL_X, PANEL_Y), (unsigned)expect_rgb(COL_BG));
+
+    /* No list, no foot: there are session figures to total and nobody to total them for.
+     * Judged by the figure itself rather than by "nothing drawn", because SLEEP's dust
+     * motes drift through this band. */
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "$4.56", got, sizeof got) == false,
+           "the panel's spend is still up with no agents: \"%s\"", got);
+
+    /* No agents means nothing for a bar to be about, so the divider goes with them. The
+     * burst the mood change started has to be over first: its ripples cross this strip. */
+    render(20);
+    {
+        char why[64];
+        EXPECT(r, assert_bar(false, why, sizeof why), "%s", why);
+    }
 }
 
 static void check_offline(result_t *r)
@@ -941,6 +1142,40 @@ static void check_offline(result_t *r)
            "headline want \"OFFLINE\" got \"%s\"", got);
     EXPECT(r, assert_text(SUMMARY_Y_MIN, SUMMARY_Y_MAX, "no link", got, sizeof got),
            "summary want \"no link\" got \"%s\"", got);
+
+    render(20);   /* past the mood-change burst, for the reason in check_empty */
+    {
+        char why[64];
+        EXPECT(r, assert_bar(false, why, sizeof why), "%s", why);
+    }
+
+    EXPECT(r, assert_pixel(PANEL_X, PANEL_Y, COL_BG),
+           "the offline panel is #%06X, not the plain background #%06X",
+           (unsigned)pixel_at(PANEL_X, PANEL_Y), (unsigned)expect_rgb(COL_BG));
+
+    /* The panel's foot goes with the list: an offline screen has no figures to show for
+     * agents it cannot vouch for. The panel has no wash here either, so anything drawn in
+     * that band would be a label. */
+    EXPECT(r, count_above_bg(0, g_w - 1, TOTAL_Y, BAR_Y - 1, 24) == 0,
+           "the panel's foot still draws %d pixels with no link",
+           count_above_bg(0, g_w - 1, TOTAL_Y, BAR_Y - 1, 24));
+
+    /* The list is cleared while the link is down: whatever the last poll reported is
+     * not something the device can still vouch for, and a stale "working" is worse than
+     * a blank. The label and its dot both go. */
+    EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "> PoC", got, sizeof got) == false,
+           "an offline list still shows \"%s\"", got);
+    EXPECT(r, count_above_bg(0, g_w - 1, LIST_Y0, LIST_Y0 + LIST_ROW_H - 1, 24) == 0,
+           "an offline list still draws %d pixels in its first row",
+           count_above_bg(0, g_w - 1, LIST_Y0, LIST_Y0 + LIST_ROW_H - 1, 24));
+
+    /* ...and it comes back with the link, because this is the render's doing and not a
+     * one-way clearing of the data. */
+    g_status.online = true;
+    g_status.gen++;
+    render(20);
+    EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "> PoC", got, sizeof got),
+           "the list did not come back with the link: got \"%s\"", got);
 }
 
 /* Six agents, four rows. The summary used to tack a "+2" on; paging reports the
@@ -975,29 +1210,27 @@ static void check_tap(result_t *r)
  * just above the body, where the resting screen is pure background. */
 static void check_flourish(result_t *r)
 {
-    /* Beside the face at its own height: at rest that is bare background, and
-     * the expanding ring crosses it. The band above the headline is not usable
-     * here because WORKING twinkles motes there. */
-    const int probe_x = BODY_CX - BODY_D / 2 - 14;
+    /* Left of the face at its own height, inside the mood panel and clear of the
+     * face itself: the expanding ring crosses this spot. Compared against what is
+     * here at rest rather than against the background, because the panel is not the
+     * background any more. */
+    const int probe_x = 22;
     const int probe_y = BODY_CY;
 
     /* Let the mood-change burst finish first: its rings sweep this exact spot. */
     render(60);
-
-    EXPECT(r, pixel_at(probe_x, probe_y) == expect_rgb(COL_BG),
-           "the probe beside the face was not background to begin with (#%06X)",
-           (unsigned)pixel_at(probe_x, probe_y));
+    const uint32_t rest = pixel_at(probe_x, probe_y);
 
     ui_companion_on_tap();
     render(6); /* 180 ms: the ring has grown past the probe */
 
-    EXPECT(r, pixel_at(probe_x, probe_y) != expect_rgb(COL_BG),
-           "no flourish ring beside the face after a tap (#%06X)",
-           (unsigned)pixel_at(probe_x, probe_y));
+    EXPECT(r, pixel_at(probe_x, probe_y) != rest,
+           "no flourish ring beside the face after a tap (#%06X)", (unsigned)pixel_at(probe_x, probe_y));
 
     render(80); /* long after: everything must be back to rest */
-    EXPECT(r, pixel_at(probe_x, probe_y) == expect_rgb(COL_BG),
-           "the flourish never cleared (#%06X)", (unsigned)pixel_at(probe_x, probe_y));
+    EXPECT(r, pixel_at(probe_x, probe_y) == rest,
+           "the flourish never cleared (#%06X, want #%06X)",
+           (unsigned)pixel_at(probe_x, probe_y), (unsigned)rest);
 }
 
 /* Two views, swiped between. Leaving the mood view must hide the face; coming
@@ -1043,12 +1276,103 @@ static void check_view_switch(result_t *r)
     render(30);
     EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "double tap from mood gave view %s",
            ui_view_name(ui_companion_view()));
+
+    /* Back to the mood view, then open the stats with two taps that are *not* on the
+     * same pixel: the way a finger does it, and the case the device failed. */
+    double_click_apart(FACE_HALF_X, FACE_HALF_Y - 20);
+    render(30);
+    EXPECT(r, ui_companion_view() == UI_VIEW_MOOD, "a travelling double tap gave view %s",
+           ui_view_name(ui_companion_view()));
+
+    double_click_apart(FACE_HALF_X, FACE_HALF_Y - 20);
+    render(30);
+    EXPECT(r, ui_companion_view() == UI_VIEW_STATS,
+           "two taps 28 px apart should open the stats view, got %s",
+           ui_view_name(ui_companion_view()));
 }
 
 /* The stats view: the only place the session numbers appear, and until this
  * scenario existed nothing asserted it at all. The numbers are the desk's own, at
  * the magnitudes that made the view unreadable before the G tier and the h/d
  * ages: a billion tokens printed as "1097.1M", an overnight session as "9602s". */
+/* The list's status column says what an agent is doing, not just that it is
+ * "working": a busy one reports its token rate, an idle one what its session has
+ * cost. Driven by moving the fixture's output totals, which is what a /stats refresh
+ * looks like to the device. */
+static void check_live_rows(result_t *r)
+{
+    char got[32];
+
+    reset_scene();
+    load_scenario("stats");     /* one working agent, three idle, all with costs */
+    ui_companion_create();
+    render(20);
+
+    /* An idle agent shows its session spend instead of the word "idle". */
+    EXPECT(r, assert_text(LIST_Y0 + LIST_ROW_H + 2, LIST_Y0 + LIST_ROW_H + 15, "$5.38", got, sizeof got),
+           "the second row (idle) want its spend \"$5.38\", got \"%s\"", got);
+
+    /* The working agent shows the rate the bridge reports — omp's own figure, not one
+     * computed here — so it is there with the first /stats the device reads. */
+    {
+        lv_obj_t *scr = lv_screen_active();
+
+        EXPECT(r, scr != NULL && assert_text_suffix_in(scr, LIST_Y0 + 2, LIST_Y0 + 15, "/s"),
+               "the working row want a token rate (\".../s\"), got \"%s\"", got);
+    }
+    /* The panel's foot: the spend over the sessions *in the list* — which is the four
+     * rows added up, not the bridge's own total, since that one also counts sessions
+     * herdr no longer reports — and, because the mood is WORKING, the sum of the rates
+     * opposite it. */
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "$12.60", got, sizeof got),
+           "the panel's spend want \"$12.60\" (the four rows added up) got \"%s\"", got);
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "340/s", got, sizeof got),
+           "the panel's rate want \"340/s\" (four agents reporting 85/s) got \"%s\"", got);
+
+    EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "working", got, sizeof got) == false,
+           "the working row still shows the state word (\"%s\")", got);
+
+    /* ...and it follows the data rather than being set once. */
+    g_sessions.per[0].tokens_per_s = 4321;
+    g_status.gen++;
+    render(20);
+    EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "4.3k/s", got, sizeof got),
+           "the working row did not follow /stats to \"4.3k/s\", got \"%s\"", got);
+
+    /* ...and in the colours asked for: #5CD8FF for the rate, #FFC844 for the money. */
+    {
+        lv_obj_t *scr = lv_screen_active();
+
+        EXPECT(r, scr != NULL && label_colour_in(scr, "4.3k/s", 0x5CD8FFu),
+               "the rate is not drawn in #5CD8FF");
+        EXPECT(r, scr != NULL && label_colour_in(scr, "$5.38", 0xFFC844u),
+               "the spend is not drawn in #FFC844");
+    }
+
+    /* The panel's rate is the sum of the agents' rates — 4321 + three at 85, which
+     * fmt_tokens() truncates to one decimal — and it is a *working* figure: with nobody
+     * working it goes, while the spend stays, the sessions being there either way. */
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "4.5k/s", got, sizeof got),
+           "the panel's rate want \"4.5k/s\" (4321 + 3 x 85) got \"%s\"", got);
+
+    set_agent(0, "Waveshare", "omp", HERDR_ST_IDLE, true);
+    g_status.gen++;
+    render(20);
+
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "4.5k/s", got, sizeof got) == false,
+           "the panel's rate is still up in a mood that is not working: \"%s\"", got);
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "$12.60", got, sizeof got),
+           "the spend went with the rate: want \"$12.60\" got \"%s\"", got);
+
+    /* ...and it comes back with the work. */
+    set_agent(0, "Waveshare", "omp", HERDR_ST_WORKING, true);
+    g_status.gen++;
+    render(20);
+
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "4.5k/s", got, sizeof got),
+           "the panel's rate did not come back: got \"%s\"", got);
+}
+
 /* The stats view: the only place the session figures appear, and now a two-column
  * table rather than one long line per row. The numbers are the desk's own, at the
  * magnitudes that made the view unreadable before the G tier and the h/d ages.
@@ -1109,10 +1433,10 @@ static void check_stats(result_t *r)
     EXPECT(r, assert_text(STATS_Y0 + 9 * STATS_ROW_H, STATS_Y0 + 9 * STATS_ROW_H + 6, "", got, sizeof got),
            "line 10 of the sessions page should be empty, got \"%s\"", got);
 
-    /* Page two: the link and the device, one tap on the list's half away — deferred
-     * by the double window, like every list tap. */
+    /* Page two: the link and the device — where the diagnostics the hold used to
+     * raise now live — one tap on the list's half away. */
     click_at(LIST_HALF_X, LIST_HALF_Y);
-    render(20);
+    render(10);
 
     EXPECT(r, assert_text(0, 30, "STATS  2/2", got, sizeof got),
            "second page marker want \"STATS  2/2\" got \"%s\"", got);
@@ -1150,7 +1474,7 @@ static void check_paging(result_t *r)
            "page 1 row 4 want \"Delta\" got \"%s\"", got);
 
     click_at(LIST_HALF_X, LIST_HALF_Y);   /* tap the list's half: forward a page */
-    render(20);   /* the page waits out the double window (~350 ms) before it moves */
+    render(10);   /* the page lands on the tap, with nothing waiting to cancel it */
 
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "Echo", got, sizeof got),
            "page 2 row 1 want \"Echo\" got \"%s\"", got);
@@ -1164,67 +1488,135 @@ static void check_paging(result_t *r)
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "> Alpha", got, sizeof got),
            "wrapping the list gave row 1 \"%s\"", got);
 
-    /* The list's double tap is the overlay's other door, and the list must not move:
-     * the tap that opened the double only scheduled a page, and the double cancels
-     * it. Rendered well past the double window, so a page that was only deferred
-     * would have landed by now. */
+    /* The list's half has no double of its own: a second tap there is a second page,
+     * and the view stays put. Two pages is a full lap of a two-page list, so this
+     * lands back where it started — and it lands at once, with nothing waiting out a
+     * window for a tap that may never come. */
     double_click_at(LIST_HALF_X, LIST_HALF_Y);
-    render(20);
+    render(10);
+    EXPECT(r, ui_companion_view() == UI_VIEW_MOOD,
+           "the list's double changed the view to %s", ui_view_name(ui_companion_view()));
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "> Alpha", got, sizeof got),
-           "the list's double moved the page: want \"> Alpha\" got \"%s\"", got);
-    EXPECT(r, pixel_at(BODY_CX, BODY_CY) < 0x202020u,
-           "the list's double did not raise the overlay (#%06X)",
-           (unsigned)pixel_at(BODY_CX, BODY_CY));
+           "two taps on the list should page a full lap: want \"> Alpha\" got \"%s\"", got);
 
-    double_click_at(LIST_HALF_X, LIST_HALF_Y);   /* again: it goes back down */
-    render(20);
-    render(20);   /* let the mood-change burst settle: its wash is not the face */
-    {
-        char why[64];
-        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
-    }
-
-    /* And the single does page, once the window has passed. */
+    /* An odd number of taps lands on the other page. */
     click_at(LIST_HALF_X, LIST_HALF_Y);
-    render(20);
+    render(10);
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "Echo", got, sizeof got),
            "a single tap on the list's half did not page: want \"Echo\" got \"%s\"", got);
 }
 
-/* The overlay covers the screen while it is on, and leaves nothing behind. */
-static void check_overlay(result_t *r)
+/* The bar's sweep. The highlight is a window that enters from off the left, crosses the
+ * bar and wraps: a second copy one bar-width behind it means one leaves on the right
+ * exactly as the other arrives on the left, so the highlighted length never changes. */
+static int bar_ink(int x0, int x1)
 {
+    return count_exact(COL_WORKING, x0, x1, BAR_Y, BAR_Y + BAR_H - 1);
+}
+
+static void check_bar(result_t *r)
+{
+    const int full = BAR_HL_W * BAR_H;   /* 200 px: the window, once it is all inside */
+    int       lo = 1 << 20, hi = 0, both = 0;
+
+    /* The runner puts the UI through 600 ms of setup before a scenario starts, so by now
+     * the sweep has entered and is lapping. Watch a whole lap of the steady state. */
+    for(int i = 0; i < BAR_LAP_MS / 30 + 2; i++) {
+        int n;
+
+        render(1);
+        n = bar_ink(0, g_w - 1);
+        if(n < lo) lo = n;
+        if(n > hi) hi = n;
+        if(bar_ink(0, 12) > 0 && bar_ink(g_w - 13, g_w - 1) > 0) both++;
+    }
+
+    EXPECT(r, hi >= full * 3 / 4,
+           "the highlight never reached its length: the most it showed was %d px of %d",
+           hi, full);
+    /* ...and the wrap itself: ink at both ends of the bar at once, which a window that
+     * merely travelled from one end to the other can never produce. */
+    EXPECT(r, both > 0, "the highlight never wrapped: it was never at both ends at once");
+    /* The point of the pair: the same length throughout, because the copy takes over as
+     * the window leaves. A gap at either end would show up here as a low sample. */
+    EXPECT(r, lo > 0 && hi - lo <= hi / 4,
+           "the highlighted length is not constant across a lap: %d..%d px", lo, hi);
+
+    /* Now restart the sweep and watch the highlight appear. It has to slide in: the tick
+     * it first shows anything, that something must be a sliver at the left edge, not the
+     * whole window arriving at once. The mood change comes from the data, and the UI
+     * applies it on its own 200 ms beat, so the first lit tick is the one to judge. */
+    set_agent(0, "PoC", "omp", HERDR_ST_IDLE, true);
+    g_status.gen++;
+    render(8);   /* 240 ms: the mood has gone to IDLE and the highlight with it */
+
+    EXPECT(r, bar_ink(0, g_w - 1) == 0,
+           "the highlight is still up in a mood that does not sweep");
+
+    set_agent(0, "PoC", "omp", HERDR_ST_WORKING, true);
+    g_status.gen++;
+
+    {
+        int first = -1, peak = 0;
+
+        for(int i = 0; i < 12; i++) {
+            const int n = bar_ink(0, g_w - 1);
+
+            render(1);
+            if(n > 0) {
+                if(first < 0) first = n;
+                if(n > peak) peak = n;
+            }
+        }
+
+        EXPECT(r, first >= 0, "the highlight never came back after the mood changed");
+        EXPECT(r, first >= 0 && first < full / 2,
+               "the highlight appeared %d px of %d wide: it should slide in, not pop in",
+               first, full);
+        EXPECT(r, first >= 0 && peak > first,
+               "the highlight did not grow after appearing: %d then %d px", first, peak);
+    }
+}
+
+/* A hold takes the view to the stats pages and brings it back — and, because a hold
+ * is not a tap, never refreshes from the bridge. This is the gesture that has to
+ * work: the double tap needs both taps inside LVGL's own limits. */
+static void check_hold(result_t *r)
+{
+    char got[32];
+
     render(20);   /* let the mood-change burst settle: its wash is not the face */
     {
         char why[64];
         EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
     }
+    EXPECT(r, ui_companion_view() == UI_VIEW_MOOD, "started in view %s",
+           ui_view_name(ui_companion_view()));
 
-    /* Hold a finger down past LVGL's long-press time (LV_INDEV_DEF_LONG_PRESS_TIME,
-     * 400 ms at this 30 ms tick), then let go. */
+    /* Hold well past the long-press time main.c sets (600 ms), then let go: a hold
+     * that lands exactly on the threshold is classified either way. */
     g_poll_now_calls = 0;
     post_press(BODY_CX, BODY_CY);
-    render(20);
+    render(30);   /* 900 ms */
     post_release();
     render(4);
 
-    /* The panel is a 94%-opaque wash of COL_BG, so the face must be gone even
-     * though the exact pixel is no longer the bare background colour. */
-    EXPECT(r, pixel_at(BODY_CX, BODY_CY) != expect_rgb(COL_WORKING),
-           "long press did not raise the overlay (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
-    EXPECT(r, pixel_at(BODY_CX, BODY_CY) < 0x202020u,
-           "the overlay is not dark (#%06X)", (unsigned)pixel_at(BODY_CX, BODY_CY));
+    EXPECT(r, ui_companion_view() == UI_VIEW_STATS, "a hold gave view %s",
+           ui_view_name(ui_companion_view()));
+    EXPECT(r, assert_text(0, 30, "STATS  1/2", got, sizeof got),
+           "the hold did not land on the stats page: want \"STATS  1/2\" got \"%s\"", got);
 
-    /* LVGL sends CLICKED on release "regardless to long press" (lv_event.h), and
-     * a click would refresh from the bridge. It must not: the press was a long
-     * press, and only a real tap is a tap. */
+    /* LVGL sends CLICKED on release "regardless to long press" (lv_event.h), and a
+     * click would refresh from the bridge. It must not: the press was a hold. */
     EXPECT(r, g_poll_now_calls == 0,
-           "a long press also read as a tap (%d bridge polls)", g_poll_now_calls);
+           "a hold also read as a tap (%d bridge polls)", g_poll_now_calls);
 
-    post_press(BODY_CX, BODY_CY);   /* a second long press drops it again */
-    render(20);
+    post_press(BODY_CX, BODY_CY);   /* a second hold takes it back */
+    render(30);
     post_release();
     render(4);
+    EXPECT(r, ui_companion_view() == UI_VIEW_MOOD, "a second hold gave view %s",
+           ui_view_name(ui_companion_view()));
     render(20);   /* let the mood-change burst settle: its wash is not the face */
     {
         char why[64];
@@ -1268,14 +1660,23 @@ static void check_burst(result_t *r)
     load_scenario("burst");
     ui_companion_create();
 
-    /* The mood (and so the burst) is applied by the first 200 ms ui_tick. */
-    render(10); /* 300 ms: the tint is at its peak and the first ring is crossing the strip */
-    uint32_t bg_hot = pixel_at(12, 46); /* background, clear of the face and rings */
-    int      ring_mid = bright_pixels_below_face(110);
+    /* The mood (and so the burst) is applied by the first 200 ms ui_tick. The ring is
+     * sampled across the whole burst rather than at one instant: the smaller face means
+     * RIPPLE_D1 is smaller, so when it crosses the strip below depends on the geometry. */
+    int ring_mid = 0;
+
+    render(10); /* 300 ms: the tint is at its peak */
+    uint32_t bg_hot = pixel_at(4, 300); /* background: below the mood panel */
+
+    for (int i = 0; i < 40; i++) {   /* 1.2 s of samples */
+        render(1);
+        const int n = bright_pixels_below_face(110);
+        if (n > ring_mid) ring_mid = n;
+    }
 
     render(80); /* 2.9 s: burst long over */
     int      ring_end = bright_pixels_below_face(110);
-    uint32_t bg_end   = pixel_at(12, 46);
+    uint32_t bg_end   = pixel_at(4, 300);
 
     EXPECT(r, bg_hot != bg_rest,
            "background #%06X did not take the mood colour at the change", (unsigned)bg_hot);
@@ -1310,7 +1711,7 @@ static int probe_blush(void)
 /* Sparkles: cool-white motes twinkling in the band above the face. */
 static int probe_motes(void)
 {
-    return count_cool_white(0, g_w - 1, 0, 45);
+    return count_cool_white(0, g_w - 1, 20, 45);   /* below the activity bar */
 }
 
 static void check_motes(result_t *r)
@@ -1428,7 +1829,9 @@ int main(void)
         { "view_switch", check_view_switch },
         { "paging",      check_paging },
         { "stats",       check_stats  },
-        { "overlay",     check_overlay },
+        { "live_rows",   check_live_rows },
+        { "hold",        check_hold    },
+        { "bar",         check_bar     },
         { "flourish",    check_flourish },
     };
     const size_t n      = sizeof scenarios / sizeof scenarios[0];
