@@ -600,6 +600,14 @@ Two halves, no USB link needed after flashing:
   (`~/.omp/agent/sessions/<slug>/<ts>_<uuid>.jsonl`), located through the herdr
   snapshot's `agent_session` (`kind == "path"`) — herdr has no usage data of its own,
   and `~/.omp/stats.db` is only as fresh as the last `omp stats` run.
+  `tok_s` is output tokens per second over the **last four turns** of that session
+  (`TOK_S_WINDOW`) — a *trailing window that does not decay*: when an agent stops, no
+  further turns are appended and the figure stays where it was, indefinitely. That is
+  deliberate (it is omp's own measurement, not one the device would have to invent from
+  successive polls), but every consumer must gate it on the agent's state, as the list
+  rows do with `HERDR_ST_WORKING`. Nothing is folded into one session's figure: each comes
+  from that agent's own log, so a subagent's tokens reach the aggregate only if herdr
+  lists the subagent as an agent of its own.
   `calls` counts tool executions, `messages` counts assistant turns, `in` is prompt
   tokens (including cache reads/writes, so `in + out == omp's own totalTokens`),
   `age_s` is seconds since that log was last written and `totals.age_s` is the
@@ -815,7 +823,11 @@ Everything the face does is `lv_anim` + two `lv_timer`s, all in
   totals, which also count sessions herdr no longer reports: `check_live_rows` asserts the
   difference, $12.60 of rows against the $12.75 the stats page shows. Bottom-left in
   `COL_MONEY` is the spend; bottom-right in `COL_RATE` is the summed rate, which only
-  exists in WORKING and only when an agent reports one. Both sit at `(TOTAL_X, TOTAL_Y)` =
+  exists in WORKING and only when an agent reports one — and which sums **only the rates
+  whose rows show one**, so the foot and the rows always add up. Summing every session's
+  rate instead reads persistently high: an idle session keeps reporting the rate of its
+  last turns, because the bridge's figure is a trailing window that does not decay (see
+  the `tok_s` note under the bridge, below), while its row shows its spend. Both sit at `(TOTAL_X, TOTAL_Y)` =
   (6, 169), a few pixels in from the screen's edge and above the bar, and both are hidden
   when the mood shows no list — the same `m->bar` flag that governs the bar and the wash,
   because `count == 0` alone is not enough: an offline device still holds the last list it
@@ -823,9 +835,10 @@ Everything the face does is `lv_anim` + two `lv_timer`s, all in
   cannot vouch for is exactly what should not be on screen. (The harness's `offline`
   payload carries session figures on purpose, so that case is covered rather than being
   masked by a missing `/stats` answer.) The rate is additionally hidden unless the mood is
-  WORKING, and both go when there is no `/stats` answer at all. They are created last in the mood container so the mood-change rings draw
-  under them, which is why the harness's ring probe stops at y=167 and its wash probe is
-  at y=150 — both bands have to stay clear of the foot.
+  WORKING, and both go when there is no `/stats` answer at all. They are created last in
+  the mood container, so the mood-change rings draw under them — which is why the
+  harness's ring probe stops at y=167 and its wash probe is at y=150: both bands have to
+  stay clear of the foot.
 - **Each mood carries its own wash** (`.tint` / `.tint_opa` in `s_moods`). The two moods
   that draw no bar — OFFLINE and SLEEP — draw no wash either, so they show the plain
   screen, and the headline is then coloured against the panel that actually results:

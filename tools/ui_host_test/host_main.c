@@ -390,7 +390,12 @@ static void load_scenario(const char *name)
             g_sessions.per[i].messages   = live[i].msgs;
             g_sessions.per[i].age_s      = live[i].age;
             g_sessions.per[i].cost_micro = live[i].cost;
-            g_sessions.per[i].tokens_per_s = 85;   /* what the bridge reports */
+            /* What the bridge reports. The three idle agents get a *different* rate on
+             * purpose: a real idle session keeps reporting the rate of its last turns
+             * (the bridge's figure is a trailing window that does not decay), and its row
+             * hides it — so the panel's sum must ignore them, and would look plausible if
+             * every agent carried the same number. */
+            g_sessions.per[i].tokens_per_s = (i == 0) ? 85 : 900;
             snprintf(g_sessions.per[i].model, sizeof g_sessions.per[i].model, "deepseek-v4.1-f");
         }
     }
@@ -1326,8 +1331,9 @@ static void check_live_rows(result_t *r)
      * opposite it. */
     EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "$12.60", got, sizeof got),
            "the panel's spend want \"$12.60\" (the four rows added up) got \"%s\"", got);
-    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "340/s", got, sizeof got),
-           "the panel's rate want \"340/s\" (four agents reporting 85/s) got \"%s\"", got);
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "85/s", got, sizeof got),
+           "the panel's rate want \"85/s\" (the one working agent; the three idle ones report "
+           "900 each but show a spend, not a rate) got \"%s\"", got);
 
     EXPECT(r, assert_text(LIST_Y0 + 2, LIST_Y0 + 15, "working", got, sizeof got) == false,
            "the working row still shows the state word (\"%s\")", got);
@@ -1352,14 +1358,15 @@ static void check_live_rows(result_t *r)
     /* The panel's rate is the sum of the agents' rates — 4321 + three at 85, which
      * fmt_tokens() truncates to one decimal — and it is a *working* figure: with nobody
      * working it goes, while the spend stays, the sessions being there either way. */
-    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "4.5k/s", got, sizeof got),
-           "the panel's rate want \"4.5k/s\" (4321 + 3 x 85) got \"%s\"", got);
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "4.3k/s", got, sizeof got),
+           "the panel's rate want \"4.3k/s\" (the working agent's 4321, not that plus the "
+           "idle agents' 900s) got \"%s\"", got);
 
     set_agent(0, "Waveshare", "omp", HERDR_ST_IDLE, true);
     g_status.gen++;
     render(20);
 
-    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "4.5k/s", got, sizeof got) == false,
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "4.3k/s", got, sizeof got) == false,
            "the panel's rate is still up in a mood that is not working: \"%s\"", got);
     EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "$12.60", got, sizeof got),
            "the spend went with the rate: want \"$12.60\" got \"%s\"", got);
@@ -1369,7 +1376,7 @@ static void check_live_rows(result_t *r)
     g_status.gen++;
     render(20);
 
-    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "4.5k/s", got, sizeof got),
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "4.3k/s", got, sizeof got),
            "the panel's rate did not come back: got \"%s\"", got);
 }
 
