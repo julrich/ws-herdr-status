@@ -41,13 +41,6 @@
 #define RING_D  138
 #define MOUTH_CY 126
 
-/* landscape (the split branch): face on the left, agent list on the right */
-#define L_BODY_CX  78
-#define L_BODY_CY  92
-#define L_BODY_D   108
-#define L_RING_D   124
-#define L_MOUTH_CY 108
-#define L_LIST_X   148
 #define L_LIST_Y0  24
 #define L_ROW_H    22
 #define L_SUMMARY_Y 158
@@ -118,17 +111,11 @@ void herdr_client_poll_now(void)
  * implementations live behind esp_* (main/herdr_client.c, ui_rotation.c,
  * ui_input.c, ui_device.c); here they are plain settable state. */
 static herdr_link_stats_t  g_link;
-static herdr_imu_stats_t   g_imu;
 static herdr_sessions_t    g_sessions;
 
 void herdr_client_stats(herdr_link_stats_t *out)
 {
     if(out != NULL) *out = g_link;
-}
-
-void ui_rotation_stats_get(herdr_imu_stats_t *out)
-{
-    if(out != NULL) *out = g_imu;
 }
 
 bool herdr_stats_get(herdr_sessions_t *out)
@@ -282,31 +269,6 @@ static void render(int iterations)
 /* ui_companion.c deletes its own tick timer when it rebuilds the UI
  * (LVGL 9 hides the timer struct, and reaching into it was never right). */
 
-/* Fresh display / event state per scenario.
- *
- * lv_obj_clean() would delete the widgets while ui_companion.c still holds
- * pointers to them *and* would leave the screen's CLICKED callbacks stacked up,
- * so the tap scenario would see one poll per accumulated create(). Loading a
- * brand-new screen with auto-delete gives a truly clean surface: the previous
- * UI is freed (keeping the 64 KB LVGL pool bounded across 8 scenarios), no
- * stale children, no stale event callbacks, exactly one create() worth of UI.
- * The old 200 ms timer is dropped first so nothing can touch the freed
- * widgets in the gap before ui_companion_create() re-points its statics. */
-/* Switch the scene between 172x320 portrait and 320x172 landscape, exactly the
- * way main.c's app_apply_rotation() does it on the device: set the display's
- * resolution and let the screens re-lay-out. Must run before reset_scene(), which
- * creates the screen at the new size. */
-static void set_scene_geometry(int w, int h)
-{
-    g_w = w;
-    g_h = h;
-
-    lv_display_t *disp = lv_display_get_default();
-    if(disp != NULL) {
-        lv_display_set_resolution(disp, w, h);
-    }
-    memset(g_fb, 0, sizeof g_fb);
-}
 
 static void reset_scene(void)
 {
@@ -339,19 +301,12 @@ static void load_scenario(const char *name)
 {
     memset(&g_status, 0, sizeof g_status);
     memset(&g_link, 0, sizeof g_link);
-    memset(&g_imu, 0, sizeof g_imu);
     memset(&g_sessions, 0, sizeof g_sessions);
 
     g_link.gen      = 17285;
     g_link.polls    = 400;
     g_link.rtt_ms   = 12;
     g_link.online   = true;
-    g_imu.running   = true;
-    g_imu.present   = true;
-    g_imu.rate_hz   = 10;
-    g_imu.axis      = 1;
-    g_imu.sign      = -1;
-    g_imu.calibrated = true;
     g_status.online = true;
     g_status.stale  = false;
     g_status.gen    = ++s_gen;
@@ -552,13 +507,8 @@ static lv_obj_t *find_label_at(int y_min, int y_max)
  * count. */
 static int face_ink(void)
 {
-    /* The face's box, as ui_layout_init() places it: portrait above the list,
-     * landscape beside it (same numbers as ui_companion.c). */
-    const int      d  = (g_w > g_h) ? 108 : BODY_D;
-    const int      cx = (g_w > g_h) ? 78 : BODY_CX;
-    const int      cy = (g_w > g_h) ? (g_h / 2 + 6) : BODY_CY;
-    const int      x0 = cx - d / 2, x1 = cx + d / 2;
-    const int      y0 = cy - d / 2, y1 = cy + d / 2;
+    const int      x0 = BODY_CX - BODY_D / 2, x1 = BODY_CX + BODY_D / 2;
+    const int      y0 = BODY_CY - BODY_D / 2, y1 = BODY_CY + BODY_D / 2;
     const uint32_t bg = expect_rgb(COL_BG);
     int            n  = 0;
 
@@ -789,21 +739,6 @@ static int bright_pixels_below_face(int threshold)
     return n;
 }
 
-/* Landscape strip below the face (y 152..166, left of the agent list), which is
- * background at rest; only a burst ring can light it up. */
-static int bright_pixels_below_face_land(void)
-{
-    int n = 0;
-
-    for(int y = 152; y <= 166; y++) {
-        for(int x = 10; x <= 140; x++) {
-            uint32_t c = pixel_at(x, y);
-            int      r = (int)((c >> 16) & 0xFF), g = (int)((c >> 8) & 0xFF), b = (int)(c & 0xFF);
-            if(r > 110 || g > 110 || b > 110) n++;
-        }
-    }
-    return n;
-}
 
 /* An exact palette match, counted inside a box. */
 static int count_exact(uint32_t rgb888, int x0, int x1, int y0, int y1)
@@ -872,11 +807,8 @@ static int count_cool_white(int x0, int x1, int y0, int y1)
  * confetti. */
 static bool in_face_box(int x, int y)
 {
-    const int d  = (g_w > g_h) ? 108 : BODY_D;
-    const int cx = (g_w > g_h) ? 78 : BODY_CX;
-    const int cy = (g_w > g_h) ? (g_h / 2 + 6) : BODY_CY;
-
-    return x >= cx - d / 2 && x <= cx + d / 2 && y >= cy - d / 2 && y <= cy + d / 2;
+    return x >= BODY_CX - BODY_D / 2 && x <= BODY_CX + BODY_D / 2 &&
+           y >= BODY_CY - BODY_D / 2 && y <= BODY_CY + BODY_D / 2;
 }
 
 static int count_confetti(void)
@@ -1364,21 +1296,7 @@ static void check_burst(result_t *r)
 /* Decoration checks                                                   */
 /* ------------------------------------------------------------------ */
 
-/* Glints: present while the eyes are open, clipped away by a blink, and carried
- * along by a glance. Boxes cover both eyes at every glance offset. */
-static int probe_glints(void)
-{
-    return count_exact(0xFFFFFF, 45, 75, 85, 110) + count_exact(0xFFFFFF, 97, 127, 85, 110);
-}
 
-static void check_glint(result_t *r)
-{
-    int lo, hi;
-
-    sample_probe(170, probe_glints, &lo, &hi); /* 5.1 s: WORKING blinks every 2.6 s */
-    EXPECT(r, hi >= 10, "no eye glint ever visible (max %d px)", hi);
-    EXPECT(r, lo == 0, "glints never disappeared across blinks (min %d px)", lo);
-}
 
 /* Blush: the cheeks get warmer than the grey IDLE face, then fade back. */
 static int probe_blush(void)
@@ -1387,20 +1305,7 @@ static int probe_blush(void)
 }
 
 
-/* Sweat: a cool drop crosses the amber face and is parked between drops. */
-static int probe_sweat(void)
-{
-    return count_bluer(100, 150, 60, 160, 25);
-}
 
-static void check_sweat(result_t *r)
-{
-    int lo, hi;
-
-    sample_probe(170, probe_sweat, &lo, &hi);
-    EXPECT(r, hi >= 10, "no sweat drop ever visible (max %d px)", hi);
-    EXPECT(r, lo == 0, "sweat never parked between drops (min %d px)", lo);
-}
 
 /* Sparkles: cool-white motes twinkling in the band above the face. */
 static int probe_motes(void)
@@ -1447,88 +1352,9 @@ static void check_party(result_t *r)
 /* and the agent list on the right. These check that, on the pixels.     */
 /* ------------------------------------------------------------------ */
 
-static void check_land_blocked(result_t *r)
-{
-    char got[64];
 
-    render(20);   /* let the mood-change burst settle: its wash is not the face */
-    {
-        char why[64];
-        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
-    }
-    EXPECT(r, assert_text(0, 22, "NEEDS YOU", got, sizeof got),
-           "landscape headline want \"NEEDS YOU\" got \"%s\"", got);
-    /* the agent list moved to the right column: its status dot is mood-coloured */
-    EXPECT(r, assert_pixel(L_LIST_X + 5, L_LIST_Y0 + L_ROW_H / 2, COL_BLOCKED),
-           "landscape row dot pixel(%d,%d) want #%06X got #%06X",
-           L_LIST_X + 5, L_LIST_Y0 + L_ROW_H / 2, (unsigned)expect_rgb(COL_BLOCKED),
-           (unsigned)pixel_at(L_LIST_X + 5, L_LIST_Y0 + L_ROW_H / 2));
-    EXPECT(r, assert_text(150, 172, "1 blocked", got, sizeof got),
-           "landscape summary want \"1 blocked\" got \"%s\"", got);
-}
 
-static void check_land_working(result_t *r)
-{
-    char got[64];
-    uint32_t ring_px = pixel_at(L_BODY_CX, L_BODY_CY - L_RING_D / 2 + 2);
 
-    render(20);   /* let the mood-change burst settle: its wash is not the face */
-    {
-        char why[64];
-        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
-    }
-    EXPECT(r, assert_text(0, 22, "WORKING", got, sizeof got),
-           "landscape headline want \"WORKING\" got \"%s\"", got);
-    /* the ring has to have survived the rescaled layout */
-    EXPECT(r, ring_px != expect_rgb(COL_BG),
-           "no ring above the face in landscape (pixel #%06X)", (unsigned)ring_px);
-}
-
-static void check_land_empty(result_t *r)
-{
-    char got[64];
-
-    render(20);   /* let the mood-change burst settle: its wash is not the face */
-    {
-        char why[64];
-        EXPECT(r, assert_face_drawn(60, why, sizeof why), "the face is not drawn (%s)", why);
-    }
-    EXPECT(r, assert_text(0, 22, "NO AGENTS", got, sizeof got),
-           "landscape headline want \"NO AGENTS\" got \"%s\"", got);
-    EXPECT(r, assert_text(150, 172, "no agents", got, sizeof got),
-           "landscape summary want \"no agents\" got \"%s\"", got);
-}
-
-/* The mood-change burst has to work at the new geometry too: the rings grow to
- * RIPPLE_D1, which is derived from the (smaller) landscape face. */
-static void check_land_burst(result_t *r)
-{
-    uint32_t bg_rest = expect_rgb(COL_BG);
-    int      ring_mid, ring_end;
-    uint32_t bg_hot, bg_end;
-
-    set_scene_geometry(320, 172);
-    reset_scene();
-    load_scenario("burst");
-    ui_companion_create();
-
-    render(10); /* 300 ms: the tint peaks and the first ring is mid-flight */
-    bg_hot   = pixel_at(10, 8); /* background, clear of the face and the list */
-    ring_mid = bright_pixels_below_face_land();
-
-    render(80);
-    ring_end = bright_pixels_below_face_land();
-    bg_end   = pixel_at(10, 8);
-
-    EXPECT(r, bg_hot != bg_rest,
-           "landscape background #%06X did not take the mood colour", (unsigned)bg_hot);
-    EXPECT(r, bg_end == bg_rest,
-           "landscape background still tinted #%06X (want #%06X)",
-           (unsigned)bg_end, (unsigned)bg_rest);
-    EXPECT(r, ring_mid >= 10,
-           "landscape burst drew only %d px below the face", ring_mid);
-    EXPECT(r, ring_end == 0, "landscape rings still drawing %d px", ring_end);
-}
 
 /* ------------------------------------------------------------------ */
 /* Frame dump + driver                                                 */
@@ -1556,7 +1382,6 @@ static void dump_ppm(const char *path)
 typedef struct {
     const char *name;
     void (*check)(result_t *r);
-    bool        landscape;
 } scenario_t;
 
 static bool run_scenario(const scenario_t *sc)
@@ -1566,7 +1391,6 @@ static bool run_scenario(const scenario_t *sc)
 
     memset(&res, 0, sizeof res);
 
-    set_scene_geometry(sc->landscape ? 320 : 172, sc->landscape ? 172 : 320);
     reset_scene();
     load_scenario(sc->name);
     ui_companion_create();
@@ -1599,19 +1423,13 @@ int main(void)
         { "tap",      check_tap      },
         { "alive",    check_alive    },
         { "burst",    check_burst    },
-        { "glint",    check_glint    },
-        { "sweat",    check_sweat    },
         { "motes",    check_motes    },
         { "party",    check_party    },
         { "view_switch", check_view_switch },
-        { "paging",      check_paging, .landscape = false },
-        { "stats",       check_stats,  .landscape = false },
+        { "paging",      check_paging },
+        { "stats",       check_stats  },
         { "overlay",     check_overlay },
         { "flourish",    check_flourish },
-        { "land_blocked", check_land_blocked, true },
-        { "land_working", check_land_working, true },
-        { "land_empty",   check_land_empty,   true },
-        { "land_burst",   check_land_burst,   true },
     };
     const size_t n      = sizeof scenarios / sizeof scenarios[0];
     int          failed = 0;

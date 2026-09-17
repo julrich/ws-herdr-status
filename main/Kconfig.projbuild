@@ -25,22 +25,4 @@ menu "Herdr status companion"
         range 1 6
         default 4
 
-    config HERDR_IMU_ROTATE
-        bool "Follow the IMU when the device is turned"
-        default y
-        help
-            The QMI8658A gyroscope detects a 90 degree turn of the device
-            (about the screen's normal axis, i.e. a spin on the desk) and the
-            UI follows into landscape or back into portrait. The normal axis is
-            calibrated from the accelerometer at boot, so no per-board axis
-            constants are needed. Turn this off to pin the panel to portrait.
-
-    config HERDR_IMU_LOG_RAW
-        bool "Log raw IMU samples once a second"
-        default n
-        help
-            Prints acceleration (g) and turn rate (deg/s) once a second while the
-            IMU is running. Useful when checking the axis calibration on a new
-            board.
-
 endmenu

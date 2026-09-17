@@ -43,62 +43,30 @@
  * The names are macros over the resolved struct: the rest of the file reads
  * like the old portrait-only version and animates correctly in both.
  */
-typedef struct {
-    lv_coord_t scr_w, scr_h;
-    lv_coord_t body_cx, body_cy, body_d, ring_d;
-    lv_coord_t eye_dx, eye_cy, eye_w, eye_h;
-    lv_coord_t mouth_cy, mouth_d;
-    lv_coord_t blush_dx, blush_cy;
-    lv_coord_t alert_x, alert_y;
-    lv_coord_t z_cx, z_base_y;
-    lv_coord_t sweat_x0, sweat_y0, sweat_x1, sweat_y1;
-    lv_coord_t ripple_d1;
-    lv_coord_t mote_top0, mote_top1, mote_low0, mote_low1;
-    lv_coord_t headline_x, headline_y;   /* portrait: centred, x ignored */
-    lv_coord_t list_x, list_y0, list_row_h, list_w;
-    lv_coord_t summary_x, summary_y;     /* portrait: centred, x ignored */
-    bool       split;                    /* list beside the face instead of below */
-} lay_t;
+/* The panel's one layout: 172x320, the face above the agent list. This was a table
+ * of two orientations switched by the IMU; with that gone the numbers are constants
+ * and the macros that read them are names for them.
+ *
+ * Everything the old face needed is gone with it (eyes, mouth, blush, ring, alert
+ * marker, "z"s, sweat): the kawaii widget lays those out inside its own panel. */
+static lv_coord_t s_scr_w, s_scr_h;   /* the screen's size, read once at create */
 
-static lay_t L;
-
-#define SCR_W      (L.scr_w)
-#define SCR_H      (L.scr_h)
-#define BODY_CX    (L.body_cx)
-#define BODY_CY    (L.body_cy)
-#define BODY_D     (L.body_d)
-#define RING_D     (L.ring_d)
-#define EYE_DX     (L.eye_dx)
-#define EYE_CY     (L.eye_cy)
-#define EYE_W      (L.eye_w)
-#define EYE_H      (L.eye_h)
-#define MOUTH_CX   (L.body_cx)
-#define MOUTH_CY   (L.mouth_cy)
-#define MOUTH_D    (L.mouth_d)
-#define BLUSH_DX   (L.blush_dx)
-#define BLUSH_CY   (L.blush_cy)
-#define ALERT_X    (L.alert_x)
-#define ALERT_Y    (L.alert_y)
-#define Z_CX       (L.z_cx)
-#define Z_BASE_Y   (L.z_base_y)
-#define SWEAT_X0   (L.sweat_x0)
-#define SWEAT_Y0   (L.sweat_y0)
-#define SWEAT_X1   (L.sweat_x1)
-#define SWEAT_Y1   (L.sweat_y1)
-#define RIPPLE_D1  (L.ripple_d1)
-#define PART_TOP0  (L.mote_top0)
-#define PART_TOP1  (L.mote_top1)
-#define PART_LOW0  (L.mote_low0)
-#define PART_LOW1  (L.mote_low1)
-#define HEADLINE_X (L.headline_x)
-#define HEADLINE_Y (L.headline_y)
-#define LIST_X     (L.list_x)
-#define LIST_Y0    (L.list_y0)
-#define LIST_ROW_H (L.list_row_h)
-#define LIST_W     (L.list_w)
-#define SUMMARY_X  (L.summary_x)
-#define SUMMARY_Y  (L.summary_y)
-#define SPLIT      (L.split)
+#define SCR_W       (s_scr_w)
+#define SCR_H       (s_scr_h)
+#define HEADLINE_Y  10
+#define BODY_CX     (SCR_W / 2)   /* the face is centred on the panel */
+#define BODY_CY     108
+#define BODY_D      120           /* the face's panel: the widget fills whatever it gets */
+#define RIPPLE_D1   (BODY_D + 80) /* the mood-change ring's travel */
+#define PART_TOP0   6             /* ambient motes above the face */
+#define PART_TOP1   42
+#define PART_LOW0   172           /* ...and below it */
+#define PART_LOW1   186
+#define LIST_X      8
+#define LIST_Y0     190
+#define LIST_ROW_H  24
+#define LIST_W      (SCR_W - 16)
+#define SUMMARY_Y   300
 
 /* Sizes that do not scale with the face. */
 #define BODY_SQUASH_D   8   /* how much the tap squash takes off the diameter */
@@ -178,81 +146,12 @@ typedef struct {
 /* Fill in the layout for the screen we are drawing on. Portrait stacks the list
  * under the face; landscape puts the face on the left and the list on the right
  * (172 px of height is not enough for both). */
+/* The screen's size, which the layout constants above are written against (and
+ * which the harness can vary to check that nothing assumes more than it needs). */
 static void ui_layout_init(lv_coord_t w, lv_coord_t h)
 {
-    L.scr_w = w;
-    L.scr_h = h;
-    L.split = (w > h);
-
-    if (!L.split) {
-        L.body_cx  = w / 2;
-        L.body_cy  = 108;
-        L.body_d   = 120;
-        L.ring_d   = 138;
-        L.eye_dx   = 26;
-        L.eye_cy   = 98;
-        L.eye_w    = 18;
-        L.eye_h    = 18;
-        L.mouth_cy = 126; /* see ui_companion.c history: the smile used to sit on the chin */
-        L.mouth_d  = 56;
-        L.blush_dx = 30;
-        L.blush_cy = 118;
-        L.alert_x  = L.body_cx + 52;
-        L.alert_y  = 40;
-        L.z_cx     = L.body_cx + 54;
-        L.z_base_y = 60;
-        L.ripple_d1 = L.body_d + 80;
-        L.headline_x = 0;
-        L.headline_y = 10;
-        L.list_x   = 8;
-        L.list_y0  = 190;
-        L.list_row_h = 24;
-        L.list_w   = w - 16;
-        L.summary_x = 0;
-        L.summary_y = 300;
-        L.mote_top0 = 6;
-        L.mote_top1 = 42;
-        L.mote_low0 = 172;
-        L.mote_low1 = 186;
-    } else {
-        L.body_cx  = 78;
-        L.body_cy  = h / 2 + 6; /* 92 at 320x172 */
-        L.body_d   = 108;
-        L.ring_d   = 124;
-        L.eye_dx   = 24;
-        L.eye_cy   = L.body_cy - 9;
-        L.eye_w    = 16;
-        L.eye_h    = 16;
-        L.mouth_cy = L.body_cy + 16;
-        L.mouth_d  = 50;
-        L.blush_dx = 27;
-        L.blush_cy = L.body_cy + 9;
-        L.alert_x  = L.body_cx + 47;
-        L.alert_y  = 26;
-        L.z_cx     = L.body_cx + 49;
-        L.z_base_y = 40;
-        L.ripple_d1 = L.body_d + 80;
-        L.headline_x = 148;
-        L.headline_y = 4;
-        L.list_x   = 148;
-        L.list_y0  = 24;
-        L.list_row_h = 22;
-        L.list_w   = w - 148 - 8;
-        L.summary_x = 148;
-        L.summary_y = 158;
-        L.mote_top0 = 2;
-        L.mote_top1 = 34;
-        L.mote_low0 = 160;
-        L.mote_low1 = 168;
-    }
-
-    /* The sweat drop rides the right cheek at the same proportions as portrait
-     * (x +34/+14, y -38/+42 at a 120 px face). */
-    const lv_coord_t u = L.body_d / 120;
-    L.sweat_x0 = L.body_cx + 34 * u;
-    L.sweat_y0 = L.body_cy - 38 * u;
-    L.sweat_x1 = L.body_cx + 48 * u;
-    L.sweat_y1 = L.body_cy + 42 * u;
+    s_scr_w = w;
+    s_scr_h = h;
 }
 
 /* ---- palette ------------------------------------------------------------ */
@@ -363,10 +262,10 @@ static lv_obj_t *s_stats_title;
  * monospaced — padding with spaces would not line anything up. */
 #define STATS_DOT_D  6
 #define STATS_ROWS   (STATS_LINES - 5)   /* a header, three totals, a header, then rows */
-#define STATS_X_LEFT (SPLIT ? HEADLINE_X : 10)
-#define STATS_TEXT_X (SPLIT ? HEADLINE_X + 12 : 22)   /* body lines that carry a dot */
-#define STATS_DOT_X  (SPLIT ? HEADLINE_X : 10)
-#define STATS_ROW_Y(i) (HEADLINE_Y + 20 + (i) * (SPLIT ? 12 : 14))
+#define STATS_X_LEFT (10)
+#define STATS_TEXT_X (22)   /* body lines that carry a dot */
+#define STATS_DOT_X  (10)
+#define STATS_ROW_Y(i) (HEADLINE_Y + 20 + (i) * (14))
 
 static lv_obj_t *s_stats_txt[STATS_LINES];
 static lv_obj_t *s_stats_val[STATS_LINES];   /* right column, right-aligned */
@@ -874,11 +773,9 @@ static void ui_overlay_render(void)
     }
 
     herdr_link_stats_t link = { 0 };
-    herdr_imu_stats_t  imu  = { 0 };
     herdr_status_t     s    = { 0 };
 
     herdr_client_stats(&link);
-    ui_rotation_stats_get(&imu);
     const bool have = herdr_client_get(&s);
 
     lv_mem_monitor_t mon;
@@ -895,9 +792,6 @@ static void ui_overlay_render(void)
              "poll    %u ok %u err\n"
              "rtt     %u ms  fail %u\n"
              "agents  %d  ovf %d\n"
-             "imu     %u Hz  err %u\n"
-             "axis    %d %s%c  %s\n"
-             "rot     %d  %dx%d\n"
              "input   tap %u  long %u\n"
              "        dbl %u  view %s",
              (unsigned)(up / 3600), (unsigned)((up / 60) % 60), (unsigned)(up % 60),
@@ -907,10 +801,6 @@ static void ui_overlay_render(void)
              (unsigned)link.polls, (unsigned)link.fail_total,
              (unsigned)link.rtt_ms, (unsigned)link.failures,
              have ? s.count : 0, have ? s.overflow : 0,
-             (unsigned)imu.rate_hz, (unsigned)imu.errors,
-             (int)imu.axis, imu.calibrated ? "cal" : "raw",
-             (imu.sign > 0) ? '+' : '-', imu.present ? "ok" : "gone",
-             SPLIT ? 1 : 0, (int)SCR_W, (int)SCR_H,
              (unsigned)s_taps, (unsigned)s_longs,
              (unsigned)s_doubles, ui_view_name(s_view));
 
@@ -1058,10 +948,8 @@ static void stats_row(int idx, lv_coord_t x, const char *left)
 static void ui_stats_render(void)
 {
     herdr_link_stats_t link = { 0 };
-    herdr_imu_stats_t  imu  = { 0 };
 
     herdr_client_stats(&link);
-    ui_rotation_stats_get(&imu);
 
     herdr_status_t   s = { 0 };
     const bool       have = herdr_client_get(&s);
@@ -1114,14 +1002,8 @@ static void ui_stats_render(void)
                   (unsigned)((lv_tick_get() / 60000u) % 60u), (unsigned)(ui_device_free_heap() / 1024));
         stats_row(6, STATS_X_LEFT, "lvgl");
         stats_val(6, "%u%%  frag %u%%", (unsigned)mon.used_pct, (unsigned)mon.frag_pct);
-        stats_row(7, STATS_X_LEFT, "imu");
-        stats_val(7, "%u Hz  %s", (unsigned)imu.rate_hz, imu.calibrated ? "calibrated" : "raw");
-        stats_row(8, STATS_X_LEFT, "axis");
-        stats_val(8, "%d %c  err %u", (int)imu.axis, (imu.sign > 0) ? '+' : '-', (unsigned)imu.errors);
-        stats_row(9, STATS_X_LEFT, "input");
-        stats_val(9, "%u tap  %u dbl", (unsigned)s_taps, (unsigned)s_doubles);
-        stats_row(10, STATS_X_LEFT, "rot");
-        stats_val(10, "%s %dx%d", SPLIT ? "land" : "port", (int)SCR_W, (int)SCR_H);
+        stats_row(7, STATS_X_LEFT, "input");
+        stats_val(7, "%u tap  %u dbl", (unsigned)s_taps, (unsigned)s_doubles);
 
         s_stats_pages = 2;
         return;
@@ -1570,7 +1452,7 @@ static bool event_in_list_half(lv_event_t *e)
     }
     lv_indev_get_point(indev, &p);
 
-    return SPLIT ? (p.x >= SCR_W / 2) : (p.y >= SCR_H / 2);
+    return (p.y >= SCR_H / 2);
 }
 
 static void screen_event_cb(lv_event_t *e)
@@ -1676,11 +1558,7 @@ void ui_companion_create(void)
     make_passive(s_headline);
     lv_obj_set_style_text_font(s_headline, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_letter_space(s_headline, 1, 0);
-    if (SPLIT) {
-        lv_obj_set_pos(s_headline, HEADLINE_X, HEADLINE_Y);
-    } else {
-        lv_obj_align(s_headline, LV_ALIGN_TOP_MID, 0, HEADLINE_Y);
-    }
+    lv_obj_align(s_headline, LV_ALIGN_TOP_MID, 0, HEADLINE_Y);
 
     /* The face itself: a widget from components/lvgl_kawaii_face (wrapped by
      * mood_face.c) that fills this panel, so the panel's size and position are the
@@ -1728,11 +1606,7 @@ void ui_companion_create(void)
     make_passive(s_summary);
     lv_obj_set_style_text_font(s_summary, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(s_summary, lv_color_hex(COL_DIM), 0);
-    if (SPLIT) {
-        lv_obj_set_pos(s_summary, SUMMARY_X, SUMMARY_Y);
-    } else {
-        lv_obj_align(s_summary, LV_ALIGN_TOP_MID, 0, SUMMARY_Y);
-    }
+    lv_obj_align(s_summary, LV_ALIGN_TOP_MID, 0, SUMMARY_Y);
 
     /* Stats view: a title plus a fixed block of lines, refreshed by
      * ui_stats_render() whenever it is on screen. */
@@ -1742,11 +1616,7 @@ void ui_companion_create(void)
     lv_obj_set_style_text_font(s_stats_title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_stats_title, lv_color_hex(COL_TEXT), 0);
     lv_label_set_text(s_stats_title, "STATS");
-    if (SPLIT) {
-        lv_obj_set_pos(s_stats_title, HEADLINE_X, HEADLINE_Y);
-    } else {
-        lv_obj_align(s_stats_title, LV_ALIGN_TOP_MID, 0, HEADLINE_Y);
-    }
+    lv_obj_align(s_stats_title, LV_ALIGN_TOP_MID, 0, HEADLINE_Y);
 
     for (int i = 0; i < STATS_LINES; i++) {
         s_stats_txt[i] = lv_label_create(s_stats_cont);
@@ -1761,7 +1631,7 @@ void ui_companion_create(void)
         make_passive(s_stats_val[i]);
         lv_obj_set_style_text_font(s_stats_val[i], &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(s_stats_val[i], lv_color_hex(COL_TEXT), 0);
-        lv_obj_align(s_stats_val[i], LV_ALIGN_TOP_RIGHT, SPLIT ? -6 : -10, STATS_ROW_Y(i));
+        lv_obj_align(s_stats_val[i], LV_ALIGN_TOP_RIGHT, -10, STATS_ROW_Y(i));
         lv_label_set_text(s_stats_val[i], "");
     }
 
