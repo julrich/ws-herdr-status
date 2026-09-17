@@ -212,7 +212,9 @@ typedef struct {
     /* Ambient particles only: the kawaii face brings its own eyes, blush, mouth,
      * tears and sparkles, so the blob's decorations are gone with the blob. */
     bool           busy;       /* animate the bar between the panel and the list */
-    bool           bar;        /* ...and whether that bar is drawn at all */
+    bool           bar;        /* ...and whether the panel has a bar, a wash and a foot at
+                                * all: the two moods with nothing to show set this false,
+                                * and the background and the foot follow it */
     uint32_t       activity_ms;/* how long one sweep takes */
     uint32_t       mote_ms;    /* ambient mote cycle; 0 == none */
     lv_opa_t       mote_opa;   /* peak mote opacity */
@@ -1412,8 +1414,12 @@ static void ui_render_list(const herdr_status_t *s)
  * sessions herdr no longer reports, and both take the colours the rows use. */
 static void ui_render_totals(const herdr_status_t *s)
 {
-    if (s->count == 0) {
-        /* No list, no totals: the same two moods that clear the list clear these with it. */
+    /* The same two moods that clear the list clear the foot with it, and for the same
+     * reason: OFFLINE and SLEEP (m->bar false) show no agents, so a figure summed over
+     * them says nothing — and the /stats snapshot behind it is stale by definition while
+     * the link is down. `count == 0` alone is not enough for that: an offline device still
+     * holds the last list the poller received. */
+    if (s->count == 0 || !s_moods[s_mood].bar) {
         lv_obj_add_flag(s_panel_spend, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_panel_rate, LV_OBJ_FLAG_HIDDEN);
         return;

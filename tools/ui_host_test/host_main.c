@@ -401,11 +401,23 @@ static void load_scenario(const char *name)
     else if(strcmp(name, "empty") == 0 || strcmp(name, "sleep_z") == 0 || strcmp(name, "land_empty") == 0) {
         g_status.count = 0;
     }
-    else if(strcmp(name, "offline") == 0) {
-        set_agent(0, "PoC", "omp", HERDR_ST_WORKING, true);
-        set_agent(1, "Docs pass", "claude", HERDR_ST_IDLE, false);
-        g_status.count  = 2;
-        g_status.online = false;
+    else if(strcmp(name, "offline") == 0 || strcmp(name, "empty") == 0) {
+        /* The offline scenario carries session figures on purpose: the device holds the
+         * last /stats snapshot it read, so "no spend while offline" has to survive a
+         * /stats answer that is there but stale. `empty` is the same for SLEEP. */
+        if(strcmp(name, "offline") == 0) {
+            set_agent(0, "PoC", "omp", HERDR_ST_WORKING, true);
+            set_agent(1, "Docs pass", "claude", HERDR_ST_IDLE, false);
+            g_status.count  = 2;
+            g_status.online = false;
+        }
+
+        g_sessions.valid      = true;
+        g_sessions.sessions   = 1;
+        g_sessions.cost_micro = 4564666u;   /* $4.56, stale */
+        g_sessions.per[0].cost_micro    = 4564666u;
+        g_sessions.per[0].tokens_per_s  = 120;
+        snprintf(g_sessions.per[0].model, sizeof g_sessions.per[0].model, "deepseek-v4.1-f");
     }
     else if(strcmp(name, "overflow") == 0 || strcmp(name, "paging") == 0) {
         static const char *labels[HERDR_MAX_AGENTS] = {
@@ -1102,6 +1114,12 @@ static void check_empty(result_t *r)
     EXPECT(r, assert_pixel(PANEL_X, PANEL_Y, COL_BG),
            "the no-agents panel is #%06X, not the plain background #%06X",
            (unsigned)pixel_at(PANEL_X, PANEL_Y), (unsigned)expect_rgb(COL_BG));
+
+    /* No list, no foot: there are session figures to total and nobody to total them for.
+     * Judged by the figure itself rather than by "nothing drawn", because SLEEP's dust
+     * motes drift through this band. */
+    EXPECT(r, assert_text(TOTAL_Y, TOTAL_Y + 12, "$4.56", got, sizeof got) == false,
+           "the panel's spend is still up with no agents: \"%s\"", got);
 
     /* No agents means nothing for a bar to be about, so the divider goes with them. The
      * burst the mood change started has to be over first: its ripples cross this strip. */

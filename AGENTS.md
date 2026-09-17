@@ -817,8 +817,13 @@ Everything the face does is `lv_anim` + two `lv_timer`s, all in
   `COL_MONEY` is the spend; bottom-right in `COL_RATE` is the summed rate, which only
   exists in WORKING and only when an agent reports one. Both sit at `(TOTAL_X, TOTAL_Y)` =
   (6, 169), a few pixels in from the screen's edge and above the bar, and both are hidden
-  when the list is (no agents, no `/stats` answer, or — for the rate — a mood that is not
-  working). They are created last in the mood container so the mood-change rings draw
+  when the mood shows no list — the same `m->bar` flag that governs the bar and the wash,
+  because `count == 0` alone is not enough: an offline device still holds the last list it
+  received and the last `/stats` snapshot, and a spend summed over agents the device
+  cannot vouch for is exactly what should not be on screen. (The harness's `offline`
+  payload carries session figures on purpose, so that case is covered rather than being
+  masked by a missing `/stats` answer.) The rate is additionally hidden unless the mood is
+  WORKING, and both go when there is no `/stats` answer at all. They are created last in the mood container so the mood-change rings draw
   under them, which is why the harness's ring probe stops at y=167 and its wash probe is
   at y=150 — both bands have to stay clear of the foot.
 - **Each mood carries its own wash** (`.tint` / `.tint_opa` in `s_moods`). The two moods
