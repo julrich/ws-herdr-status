@@ -11,6 +11,12 @@
 
 #include "ui_companion.h"
 
+/* The mood face is 0015/lvgl_kawaii_face (MIT), vendored in components/: it draws
+ * its own eyes, blush, mouth, tears and sparkles on LVGL canvases and knows a set of
+ * expressions, which is what the mood table below hands it. LVGL-only, like this
+ * file, so the host harness renders it too. */
+#include "mood_face.h"
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -281,79 +287,40 @@ typedef enum {
 } mood_t;
 
 typedef struct {
-    uint32_t    body;       /* body + headline colour */
-    const char *headline;
-    uint16_t    mouth_start, mouth_end;
-    int32_t     mouth_w;
-    uint32_t    blink_ms;   /* 0 == eyes held shut (sleep/offline) */
-    uint32_t    bob_ms;     /* full bob cycle */
-    int32_t     bob_amp;
-    int32_t     breathe_amp;/* extra body width at the top of the breath; 0 == none */
-    uint32_t    look_ms_min, look_ms_max; /* eye-glance interval window */
-    int32_t     look_px;    /* sideways eye travel; 0 == eyes do not look around */
-    bool        ring;       /* ring + sweep visible */
-    uint32_t    ring_ms;
-    uint32_t    ring_glow_ms; /* ring/sweep opacity breathing; 0 == none */
-    uint32_t    talk_ms;    /* mouth open/close cycle; 0 == none */
-    uint32_t    alert_ms;   /* 0 == alert marker hidden */
-    uint32_t    z_ms;       /* 0 == "z" hidden */
-    bool        flat_mouth;
-    /* decorations */
-    bool        glint;      /* eye highlights */
-    uint32_t    blush_ms;   /* cheek blush cycle; 0 == none */
-    uint32_t    sweat_ms;   /* sweat-drop cycle; 0 == none */
-    uint32_t    mote_ms;    /* ambient mote cycle; 0 == none */
-    lv_opa_t    mote_opa;   /* peak mote opacity */
-    int32_t     mote_rise;  /* mote travel, px */
-    bool        party;      /* confetti on a mood change */
+    uint32_t       body;       /* headline colour, and the mood-change tint */
+    const char    *headline;
+    mood_face_t    face;       /* the resting expression */
+    mood_face_t    reaction;   /* what a change into this mood plays first */
+    /* Ambient particles only: the kawaii face brings its own eyes, blush, mouth,
+     * tears and sparkles, so the blob's decorations are gone with the blob. */
+    uint32_t       mote_ms;    /* ambient mote cycle; 0 == none */
+    lv_opa_t       mote_opa;   /* peak mote opacity */
+    int32_t        mote_rise;  /* mote travel, px */
+    bool           party;      /* confetti on a mood change */
 } mood_cfg_t;
 
 /* One animation per property per mood — every property below (y, width, x,
  * height, angles, arc width, opa, border opa, bg opa) is written by at most one
  * running animation, so nothing fights over a value. See ui_apply_mood(). */
 static const mood_cfg_t s_moods[MOOD_N] = {
-    [MOOD_BLOCKED] = {
-        .body = COL_BLOCKED, .headline = "NEEDS YOU",
-        .mouth_start = 45, .mouth_end = 135, .mouth_w = 6,
-        .blink_ms = 1200, .bob_ms = 1000, .bob_amp = 5, .breathe_amp = 4,
-        .look_ms_min = 1200, .look_ms_max = 2400, .look_px = 2,
-        .alert_ms = 700,
-        .glint = true, .sweat_ms = 2200,
-    },
-    [MOOD_WORKING] = {
-        .body = COL_WORKING, .headline = "WORKING",
-        .mouth_start = 30, .mouth_end = 150, .mouth_w = 5,
-        .blink_ms = 2600, .bob_ms = 600, .bob_amp = 4, .breathe_amp = 3,
-        .look_ms_min = 1600, .look_ms_max = 3200, .look_px = 4,
-        .ring = true, .ring_ms = 1400, .ring_glow_ms = 700,
-        .talk_ms = 450,
-        .glint = true, .mote_ms = 800, .mote_opa = 255, .mote_rise = 16,
-    },
-    [MOOD_DONE] = {
-        .body = COL_DONE, .headline = "DONE",
-        .mouth_start = 10, .mouth_end = 170, .mouth_w = 5,
-        .blink_ms = 1600, .bob_ms = 700, .bob_amp = 6, .breathe_amp = 6,
-        .look_ms_min = 1800, .look_ms_max = 3600, .look_px = 4,
-        .glint = true, .blush_ms = 1500, .party = true,
-    },
-    [MOOD_IDLE] = {
-        .body = COL_IDLE, .headline = "IDLE",
-        .mouth_start = 20, .mouth_end = 160, .mouth_w = 5,
-        .blink_ms = 3400, .bob_ms = 1800, .bob_amp = 3, .breathe_amp = 3,
-        .look_ms_min = 2600, .look_ms_max = 5200, .look_px = 5,
-        .glint = true, .blush_ms = 2200,
-    },
-    [MOOD_SLEEP] = {
-        .body = COL_SLEEP, .headline = "NO AGENTS",
-        .blink_ms = 0, .bob_ms = 2600, .bob_amp = 3, .breathe_amp = 3,
-        .z_ms = 2600, .flat_mouth = true,
-        .mote_ms = 3200, .mote_opa = 110, .mote_rise = 26,
-    },
-    [MOOD_OFFLINE] = {
-        .body = COL_OFFLINE, .headline = "OFFLINE",
-        .blink_ms = 0, .bob_ms = 3200, .bob_amp = 2, .breathe_amp = 2,
-        .flat_mouth = true,
-    },
+    /* Mood to expression. The kawaii face has seventeen, so each mood gets the one
+     * that reads right, and a reaction that says what *changed* before the resting
+     * expression takes over (see s_face_reaction in ui_tick). */
+    [MOOD_BLOCKED] = { .body = COL_BLOCKED, .headline = "NEEDS YOU",
+                       .face = MOOD_FACE_WORRIED,      .reaction = MOOD_FACE_SURPRISED },
+    [MOOD_WORKING] = { .body = COL_WORKING, .headline = "WORKING",
+                       .face = MOOD_FACE_WORKING,      .reaction = MOOD_FACE_COOL,
+                       .mote_ms = 800, .mote_opa = 255, .mote_rise = 16 },
+    [MOOD_DONE]    = { .body = COL_DONE, .headline = "DONE",
+                       .face = MOOD_FACE_HAPPY,        .reaction = MOOD_FACE_EXCITED,
+                       .party = true },
+    [MOOD_IDLE]    = { .body = COL_IDLE, .headline = "IDLE",
+                       .face = MOOD_FACE_NEUTRAL,      .reaction = MOOD_FACE_SMIRK },
+    [MOOD_SLEEP]   = { .body = COL_SLEEP, .headline = "NO AGENTS",
+                       .face = MOOD_FACE_SLEEPY,       .reaction = MOOD_FACE_SLEEPY,
+                       .mote_ms = 3200, .mote_opa = 110, .mote_rise = 26 },
+    [MOOD_OFFLINE] = { .body = COL_OFFLINE, .headline = "OFFLINE",
+                       .face = MOOD_FACE_SAD,          .reaction = MOOD_FACE_CONFUSED },
 };
 
 static const char *s_mood_names[MOOD_N] = {
@@ -366,16 +333,8 @@ static const char *TAG = "ui";
 
 static lv_obj_t *s_scr; /* the active screen: background tint target */
 static lv_obj_t *s_headline;
-static lv_obj_t *s_ring;
-static lv_obj_t *s_sweep;
-static lv_obj_t *s_body;
-static lv_obj_t *s_eye[2];
-static lv_obj_t *s_glint[2];
-static lv_obj_t *s_blush[2];
-static lv_obj_t *s_sweat;
+static lv_obj_t *s_face;       /* the kawaii face's parent panel: it fills this */
 static lv_obj_t *s_part[PART_N];
-static lv_obj_t *s_mouth;
-static lv_obj_t *s_mouth_flat;
 static lv_obj_t *s_ripple[RIPPLE_N];
 /* Each ring's own diameter range. The fade is driven by the animation's progress
  * rather than by the current diameter: a size-tied fade (v - BODY_D over the
@@ -384,9 +343,6 @@ static lv_obj_t *s_ripple[RIPPLE_N];
 static struct {
     int32_t d0, d1;
 } s_ripple_geom[RIPPLE_N];
-static lv_obj_t *s_alert;
-static lv_obj_t *s_z;
-static lv_obj_t *s_z2;
 static lv_obj_t *s_summary;
 static lv_obj_t *s_row[UI_ROWS];
 static lv_obj_t *s_dot[UI_ROWS];
@@ -420,6 +376,9 @@ static lv_obj_t *s_stats_dot[STATS_ROWS];    /* one per session row */
 static uint32_t  s_taps;      /* interaction counters, shown by the overlay */
 static uint32_t  s_longs;
 static uint32_t  s_doubles;
+static uint8_t   s_page_due;  /* beats left before the list's page lands, 0 = none */
+static uint8_t   s_face_reaction;  /* beats left of a mood-change reaction, 0 = none */
+#define FACE_REACTION_TICKS 6   /* how long a mood change holds its reaction */
 static uint32_t  s_flourish_count;
 static int       s_stats_page;    /* the stats view has two pages of its own */
 static int       s_stats_pages;
@@ -436,14 +395,11 @@ static const flourish_cfg_t s_flourish[MOOD_N] = {
 };
 
 static mood_t   s_mood;
-static bool     s_bob_running;
-static bool     s_squash_running;
 static uint32_t s_last_gen;
 static bool     s_last_online;
 static mood_t   s_last_mood;
 static uint32_t s_burst_colour;  /* mood colour of the ripple/tint burst in flight */
 static int32_t  s_eye_dx;        /* current sideways glance offset, px */
-static uint32_t s_look_wait;     /* glance countdown, in UI_LOOK_TICK units */
 
 /* Per-particle parameters, filled in when a mote/confetti run starts. Motes use
  * x0/y0 as the resting spot and y1 as the travel; confetti uses x0,y0 -> x1,y1. */
@@ -457,80 +413,24 @@ static part_cfg_t s_part_cfg[PART_N];
 
 /* ---- animation callbacks ------------------------------------------------ */
 
-static void anim_body_bob(void *var, int32_t v)
-{
-    lv_obj_set_y((lv_obj_t *)var, BODY_CY - BODY_D / 2 - v);
-}
 
 /* Tap feedback: squash towards the centre, then LVGL plays it back. */
-static void anim_body_squash(void *var, int32_t v)
-{
-    lv_obj_t *body = var;
-    lv_obj_set_height(body, (lv_coord_t)v);
-    lv_obj_set_y(body, BODY_CY - (lv_coord_t)(v / 2));
-}
 
-static void anim_eye_blink(void *var, int32_t v)
-{
-    lv_obj_t *eye = var;
-    lv_obj_set_height(eye, (lv_coord_t)v);
-    lv_obj_set_y(eye, EYE_CY - (lv_coord_t)(v / 2));
-}
 
 /* Breathing: the face gets a little wider and back, always about its centre.
  * Width and x only — y belongs to the bob, height to the tap squash. */
-static void anim_body_breathe(void *var, int32_t v)
-{
-    lv_obj_t *body = var;
-    lv_coord_t w = BODY_D + (lv_coord_t)v;
-
-    lv_obj_set_width(body, w);
-    lv_obj_set_x(body, BODY_CX - w / 2);
-}
 
 /* Both eyes glance sideways together; their spacing never changes. */
-static void anim_eye_look(void *var, int32_t v)
-{
-    LV_UNUSED(var);
-    s_eye_dx = v;
-    lv_obj_set_x(s_eye[0], BODY_CX - EYE_DX - EYE_W / 2 + (lv_coord_t)v);
-    lv_obj_set_x(s_eye[1], BODY_CX + EYE_DX - EYE_W / 2 + (lv_coord_t)v);
-}
 
 /* Ring + sweep glow breathing. The sweep's rotation is a different animation on
  * a different property, so the two coexist. */
-static void anim_ring_glow(void *var, int32_t v)
-{
-    LV_UNUSED(var);
-    lv_obj_set_style_border_opa(s_ring, (lv_opa_t)v, 0);
-    lv_obj_set_style_arc_opa(s_sweep, (lv_opa_t)v, LV_PART_INDICATOR);
-}
 
 /* Working face mutters to itself: the smile thickens and thins. Animating the
  * arc's angles instead moved each corner by ~2 px — invisible. */
-static void anim_mouth_talk(void *var, int32_t v)
-{
-    LV_UNUSED(var);
-    lv_obj_set_style_arc_width(s_mouth, MOUTH_W + v, LV_PART_INDICATOR);
-}
 
-static void anim_sweep_rotation(void *var, int32_t v)
-{
-    lv_arc_set_rotation((lv_obj_t *)var, (uint16_t)v);
-}
 
-static void anim_alert_blink(void *var, int32_t v)
-{
-    lv_obj_set_style_opa((lv_obj_t *)var, (lv_opa_t)v, 0);
-}
 
 /* Single callback: the "z" drifts up and fades out over one span. */
-static void anim_z_float(void *var, int32_t v)
-{
-    lv_obj_t *z = var;
-    lv_obj_set_y(z, Z_BASE_Y - v);
-    lv_obj_set_style_opa(z, (lv_opa_t)(255 - v * 255 / Z_RISE), 0);
-}
 
 /* Mood-change burst ring: expands from the face's own size out past the panel
  * edge while fading out. border_opa (not opa) so the fade is real: style `opa`
@@ -577,35 +477,9 @@ static void anim_bg_tint(void *var, int32_t v)
 /* Filled decorations fade through bg_opa: the object-level `opa` style is only
  * an all-or-nothing cutoff in LVGL 8 (lv_obj_draw.c:41-48), so it cannot fade
  * a fill. */
-static void anim_blush(void *var, int32_t v)
-{
-    LV_UNUSED(var);
-    lv_obj_set_style_bg_opa(s_blush[0], (lv_opa_t)v, 0);
-    lv_obj_set_style_bg_opa(s_blush[1], (lv_opa_t)v, 0);
-}
 
 /* Sweat: the first half of the cycle slides and fades; the rest is parked
  * invisible, which is how a one-value animation gets a pause. */
-static void anim_sweat(void *var, int32_t v)
-{
-    if (v >= SWEAT_MOVE) {
-        lv_obj_set_style_bg_opa((lv_obj_t *)var, LV_OPA_TRANSP, 0);
-        return;
-    }
-    const int32_t t = v * 1000 / SWEAT_MOVE; /* 0..1000 across the slide */
-    int32_t       opa;
-
-    if (t < 150) {
-        opa = SWEAT_OPA * t / 150;
-    } else if (t > 750) {
-        opa = SWEAT_OPA * (1000 - t) / 250;
-    } else {
-        opa = SWEAT_OPA;
-    }
-    lv_obj_set_pos((lv_obj_t *)var, SWEAT_X0 + (SWEAT_X1 - SWEAT_X0) * t / 1000,
-                   SWEAT_Y0 + (SWEAT_Y1 - SWEAT_Y0) * t / 1000);
-    lv_obj_set_style_bg_opa((lv_obj_t *)var, (lv_opa_t)opa, 0);
-}
 
 static int part_index_of(const lv_obj_t *p)
 {
@@ -723,141 +597,17 @@ static void start_anim(lv_obj_t *obj, lv_anim_exec_xcb_t exec, int32_t from, int
 
 /* Time and playback time are halves of the cycle for every looping animation,
  * so the table's period is the wall-clock period. */
-static void ui_start_bob(void)
-{
-    const mood_cfg_t *m = &s_moods[s_mood];
-    lv_anim_del(s_body, anim_body_bob);
-    start_anim(s_body, anim_body_bob, 0, m->bob_amp,
-               m->bob_ms / 2, m->bob_ms - m->bob_ms / 2, lv_anim_path_ease_in_out);
-    s_bob_running = true;
-}
 
-static void ui_start_blink(void)
-{
-    const mood_cfg_t *m = &s_moods[s_mood];
-    for (int i = 0; i < 2; i++) {
-        lv_anim_del(s_eye[i], anim_eye_blink);
-        if (m->blink_ms == 0) {
-            lv_obj_set_height(s_eye[i], EYE_SHUT_H);
-            lv_obj_set_y(s_eye[i], EYE_CY - EYE_SHUT_H / 2);
-        } else {
-            lv_obj_set_height(s_eye[i], EYE_H);
-            lv_obj_set_y(s_eye[i], EYE_CY - EYE_H / 2);
-            start_anim(s_eye[i], anim_eye_blink, EYE_H, 2,
-                       m->blink_ms / 2, m->blink_ms - m->blink_ms / 2, lv_anim_path_linear);
-        }
-    }
-}
 
-static void squash_ready_cb(lv_anim_t *a)
-{
-    LV_UNUSED(a);
-    s_squash_running = false;
-}
 
-static void ui_start_breathe(void)
-{
-    const mood_cfg_t *m = &s_moods[s_mood];
-
-    lv_anim_del(s_body, anim_body_breathe);
-    if (m->breathe_amp == 0) {
-        anim_body_breathe(s_body, 0);
-        return;
-    }
-
-    /* A quarter cycle behind the bob: in phase, the widening was cancelled by
-     * the vertical offset and the breath was invisible. */
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, s_body);
-    lv_anim_set_exec_cb(&a, anim_body_breathe);
-    lv_anim_set_values(&a, 0, m->breathe_amp);
-    lv_anim_set_delay(&a, m->bob_ms / 4);
-    lv_anim_set_time(&a, m->bob_ms / 2);
-    lv_anim_set_playback_time(&a, m->bob_ms - m->bob_ms / 2);
-    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
-    lv_anim_start(&a);
-}
 
 /* The ring only exists in the WORKING mood, so the glow follows it. */
-static void ui_start_glow(void)
-{
-    const mood_cfg_t *m = &s_moods[s_mood];
 
-    lv_anim_del(s_ring, anim_ring_glow);
-    if (m->ring_glow_ms == 0) {
-        lv_obj_set_style_border_opa(s_ring, LV_OPA_COVER, 0);
-        lv_obj_set_style_arc_opa(s_sweep, LV_OPA_COVER, LV_PART_INDICATOR);
-        return;
-    }
-    start_anim(s_ring, anim_ring_glow, LV_OPA_COVER, 120,
-               m->ring_glow_ms / 2, m->ring_glow_ms - m->ring_glow_ms / 2, lv_anim_path_ease_in_out);
-}
-
-static void ui_start_talk(void)
-{
-    const mood_cfg_t *m = &s_moods[s_mood];
-
-    lv_anim_del(s_mouth, anim_mouth_talk);
-    if (m->talk_ms == 0) {
-        return;
-    }
-    start_anim(s_mouth, anim_mouth_talk, 0, 4,
-               m->talk_ms / 2, m->talk_ms - m->talk_ms / 2, lv_anim_path_ease_in_out);
-}
 
 /* Two "z"s, the second half a cycle behind the first. */
-static void ui_start_z(void)
-{
-    const mood_cfg_t *m = &s_moods[s_mood];
-
-    lv_anim_del(s_z, anim_z_float);
-    lv_anim_del(s_z2, anim_z_float);
-    if (m->z_ms == 0) {
-        return;
-    }
-
-    start_anim(s_z, anim_z_float, 0, Z_RISE, m->z_ms, 0, lv_anim_path_linear);
-
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, s_z2);
-    lv_anim_set_exec_cb(&a, anim_z_float);
-    lv_anim_set_values(&a, 0, Z_RISE);
-    lv_anim_set_delay(&a, m->z_ms / 2);
-    lv_anim_set_time(&a, m->z_ms);
-    lv_anim_set_playback_time(&a, 0);
-    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_path_cb(&a, lv_anim_path_linear);
-    lv_anim_start(&a);
-}
 
 /* Cheek blush fades in and out on its own slow cycle. */
-static void ui_start_blush(void)
-{
-    const mood_cfg_t *m = &s_moods[s_mood];
 
-    lv_anim_del(s_blush[0], anim_blush);
-    if (m->blush_ms == 0) {
-        anim_blush(NULL, LV_OPA_TRANSP);
-        return;
-    }
-    start_anim(s_blush[0], anim_blush, LV_OPA_TRANSP, BLUSH_OPA,
-               m->blush_ms / 2, m->blush_ms - m->blush_ms / 2, lv_anim_path_ease_in_out);
-}
-
-static void ui_start_sweat(void)
-{
-    const mood_cfg_t *m = &s_moods[s_mood];
-
-    lv_anim_del(s_sweat, anim_sweat);
-    if (m->sweat_ms == 0) {
-        anim_sweat(s_sweat, SWEAT_MOVE); /* parks it invisibly */
-        return;
-    }
-    start_anim(s_sweat, anim_sweat, 0, 1000, m->sweat_ms, 0, lv_anim_path_linear);
-}
 
 /* Hide every particle and stop whatever was driving it. */
 static void ui_stop_particles(void)
@@ -939,40 +689,6 @@ static void ui_start_confetti(void)
  * — so a screen rebuild can identify and drop it by period alone (the host
  * harness drops period-200 timers; a re-rolled period would slip through and
  * touch freed widgets). */
-static void ui_look_fire(lv_timer_t *timer)
-{
-    LV_UNUSED(timer);
-    const mood_cfg_t *m = &s_moods[s_mood];
-
-    if (s_look_wait > 0) {
-        s_look_wait--;
-        return;
-    }
-    if (m->look_px <= 0) {
-        return; /* shut eyes (sleep/offline) never glance */
-    }
-    s_look_wait = (m->look_ms_min + lv_rand(0, m->look_ms_max - m->look_ms_min)) / UI_LOOK_TICK;
-
-    int32_t target;
-    switch (lv_rand(0, 2)) {
-    case 0:  target = -m->look_px; break;
-    case 1:  target = 0;           break;
-    default: target = m->look_px;  break;
-    }
-    if (target == s_eye_dx) {
-        /* Always move: rest if we were off-centre, glance otherwise. */
-        target = (s_eye_dx == 0) ? -m->look_px : 0;
-    }
-
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, s_eye[0]);
-    lv_anim_set_exec_cb(&a, anim_eye_look);
-    lv_anim_set_values(&a, s_eye_dx, target);
-    lv_anim_set_time(&a, 140);
-    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
-    lv_anim_start(&a);
-}
 
 /* Mood change: two rings wash out of the face and the background takes the new
  * colour for a moment. Restarting is safe — the callbacks rewrite both values
@@ -1117,7 +833,7 @@ void ui_companion_on_page(int dir)
 void ui_companion_on_toggle_overlay(void)
 {
     if (s_overlay != NULL) {
-        lv_obj_del(s_overlay); /* takes the label with it */
+        lv_obj_delete(s_overlay); /* takes the label with it */
         s_overlay      = NULL;
         s_overlay_text = NULL;
         UI_LOGI(TAG, "overlay off");
@@ -1194,7 +910,7 @@ static void ui_overlay_render(void)
              (unsigned)imu.rate_hz, (unsigned)imu.errors,
              (int)imu.axis, imu.calibrated ? "cal" : "raw",
              (imu.sign > 0) ? '+' : '-', imu.present ? "ok" : "gone",
-             SPLIT ? 1 : 0, SCR_W, SCR_H,
+             SPLIT ? 1 : 0, (int)SCR_W, (int)SCR_H,
              (unsigned)s_taps, (unsigned)s_longs,
              (unsigned)s_doubles, ui_view_name(s_view));
 
@@ -1405,7 +1121,7 @@ static void ui_stats_render(void)
         stats_row(9, STATS_X_LEFT, "input");
         stats_val(9, "%u tap  %u dbl", (unsigned)s_taps, (unsigned)s_doubles);
         stats_row(10, STATS_X_LEFT, "rot");
-        stats_val(10, "%s %dx%d", SPLIT ? "land" : "port", SCR_W, SCR_H);
+        stats_val(10, "%s %dx%d", SPLIT ? "land" : "port", (int)SCR_W, (int)SCR_H);
 
         s_stats_pages = 2;
         return;
@@ -1574,85 +1290,23 @@ static void ui_apply_mood(mood_t mood)
     const mood_cfg_t *m = &s_moods[mood];
     s_mood = mood;
 
-    lv_obj_set_style_bg_color(s_body, lv_color_hex(m->body), 0);
-
     lv_label_set_text(s_headline, m->headline);
     lv_obj_set_style_text_color(s_headline, lv_color_hex(m->body), 0);
 
-    /* mouth: a smile arc, or a flat bar for sleep/offline */
-    if (m->flat_mouth) {
-        lv_obj_add_flag(s_mouth, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(s_mouth_flat, LV_OBJ_FLAG_HIDDEN);
+    /* The face reacts to the change first and settles into the mood's own
+     * expression a few beats later (the countdown runs in ui_tick). A mood whose
+     * reaction is its expression just changes once. */
+    if (m->reaction != m->face) {
+        mood_face_set(m->reaction, true);
+        s_face_reaction = FACE_REACTION_TICKS;
     } else {
-        lv_obj_clear_flag(s_mouth, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_mouth_flat, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_style_arc_width(s_mouth, m->mouth_w, LV_PART_INDICATOR);
-        lv_arc_set_angles(s_mouth, m->mouth_start, m->mouth_end);
+        mood_face_set(m->face, true);
+        s_face_reaction = 0;
     }
 
-    ui_start_blink();
-
-    /* eyes recentre instantly on a mood change, then keep glancing */
-    lv_anim_del(s_eye[0], anim_eye_look);
-    anim_eye_look(NULL, 0);
-    s_look_wait = 5; /* hold the new expression for ~1 s before the first glance */
-
-    /* mouth movement (working only) */
-    ui_start_talk();
-
-    /* ring + sweep */
-    lv_anim_del(s_sweep, anim_sweep_rotation);
-    if (m->ring) {
-        lv_obj_clear_flag(s_ring, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(s_sweep, LV_OBJ_FLAG_HIDDEN);
-        start_anim(s_sweep, anim_sweep_rotation, 0, 360, m->ring_ms, 0, lv_anim_path_linear);
-    } else {
-        lv_obj_add_flag(s_ring, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_sweep, LV_OBJ_FLAG_HIDDEN);
-    }
-    ui_start_glow();
-
-    /* alert marker */
-    lv_anim_del(s_alert, anim_alert_blink);
-    if (m->alert_ms) {
-        lv_obj_clear_flag(s_alert, LV_OBJ_FLAG_HIDDEN);
-        start_anim(s_alert, anim_alert_blink, 255, 0,
-                   m->alert_ms / 2, m->alert_ms - m->alert_ms / 2, lv_anim_path_linear);
-    } else {
-        lv_obj_add_flag(s_alert, LV_OBJ_FLAG_HIDDEN);
-    }
-
-    /* "z"s */
-    ui_start_z();
-    if (m->z_ms) {
-        lv_obj_clear_flag(s_z, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(s_z2, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(s_z, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_z2, LV_OBJ_FLAG_HIDDEN);
-    }
-
-    /* breathing */
-    ui_start_breathe();
-
-    /* decorations */
-    for (int i = 0; i < 2; i++) {
-        if (m->glint) {
-            lv_obj_clear_flag(s_glint[i], LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(s_glint[i], LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-    ui_start_blush();
-    ui_start_sweat();
+    /* Ambient motes are the only decoration left that the face does not draw. */
     ui_stop_particles();
     ui_start_motes();
-
-    /* Body bob: restart under the new tempo, unless a tap squash owns the body
-     * right now (ui_tick re-arms the bob once the squash is done). */
-    lv_anim_del(s_body, anim_body_bob);
-    s_bob_running = false;
-    if (!s_squash_running) ui_start_bob();
 }
 
 /* ---- list + summary ----------------------------------------------------- */
@@ -1803,7 +1457,6 @@ static void ui_tick(lv_timer_t *timer)
     herdr_status_t s;
     if (!herdr_client_get(&s)) return;
 
-    if (!s_bob_running && !s_squash_running) ui_start_bob();
 
     const mood_t mood = mood_for(&s);
     const bool mood_changed = (mood != s_last_mood);
@@ -1811,6 +1464,16 @@ static void ui_tick(lv_timer_t *timer)
     const bool fresh = (s.gen != s_last_gen) || online_changed;
     s_last_gen = s.gen;
     s_last_online = s.online;
+    /* A list tap's page lands here, a few beats after the tap (see PAGE_DELAY_TICKS). */
+    if (s_page_due != 0 && --s_page_due == 0) {
+        ui_companion_on_page(1);
+    }
+
+    /* A mood-change reaction is over: back to the mood's resting face. */
+    if (s_face_reaction != 0 && --s_face_reaction == 0) {
+        mood_face_set(s_moods[s_mood].face, true);
+    }
+
     if (!fresh) return;
 
     if (mood != s_mood) {
@@ -1853,7 +1516,7 @@ static void ui_tick(lv_timer_t *timer)
  * thing on this panel: a drag that LVGL reads as a gesture also suppresses the
  * click, so a swipe that fell short did nothing at all, and one that carried on
  * into the wrong object did something else. The screen is small enough to reach
- * every corner, so the vocabulary is now positional.
+ * every corner, so the vocabulary is positional.
  *
  * The long side of the screen is split into two equal halves, and the artwork
  * keeps the same roles in both orientations — portrait puts the face in the top
@@ -1865,102 +1528,78 @@ static void ui_tick(lv_timer_t *timer)
  *   tap    the list's half    forward a page (the agent list, or the stats page)
  *   double the face's half    the other view
  *   double the list's half    the diagnostics overlay
- *   hold   anywhere           the overlay too, unchanged
+ *   hold   anywhere           the overlay too, and nothing else
  *
- * The face's tap fires immediately: it is the one that wants feedback, and its
- * double (the other view) is orthogonal to it, so both may happen. The list's tap
- * pages, which a double cannot also do, so that one waits out the double window
- * (DOUBLE_MS) and is cancelled if a second tap arrives. */
-#define DOUBLE_MS 350   /* slow enough for a deliberate double tap */
+ * LVGL 9 tells single clicks from doubles itself (SINGLE_CLICKED / DOUBLE_CLICKED,
+ * classified inside the long-press time), which is a good deal less code and less
+ * guesswork than the hand-rolled window this used to keep: it also means a long
+ * press sends no click at all, so a hold cannot be mistaken for a tap.
+ *
+ * The face's tap acts at once — it is the one that wants feedback, and its double
+ * only switches view, which is orthogonal. The list's tap pages, which a double
+ * cannot also do, so it waits out the window in a one-shot timer that the double
+ * cancels. */
+/* The list's tap pages forward, but only if no second tap arrives: paging straight
+ * away and undoing it on a double flickers through a page nobody asked for. The wait
+ * is counted in ui_tick's own 200 ms beats rather than kept in a one-shot lv_timer,
+ * because it has to outlast LVGL's double-click classification — and three beats
+ * (~600 ms) clears even a deliberate double. */
+#define PAGE_DELAY_TICKS 3
+static lv_timer_t *s_ui_timer;     /* the 200 ms ui_tick timer, owned per screen */
 
-static bool       s_long_fired;
-static bool       s_have_last_click;
-static uint32_t   s_last_click_tick;
-static bool       s_last_click_list;
-static lv_timer_t *s_page_timer;   /* the list's single tap, waiting out the double window */
-
-/* The list's tap pages forward, but only once the double window has passed without
- * a second tap: paging straight away and undoing it on a double flickers through a
- * page nobody asked for, and depends on the exact state the previous click left
- * behind. The face's tap stays immediate — that is the one that wants feedback. */
-static void page_timer_cb(lv_timer_t *t)
+static void page_delay_cancel(void)
 {
-    (void)t;
-    s_page_timer = NULL;   /* one-shot: LVGL frees it once this returns */
-    ui_companion_on_page(1);
+    s_page_due = 0;
+}
+
+/* Which half the pointer is in. Portrait: the list is the bottom half. Landscape:
+ * the list is the right half, its column starting at x=148 of 320. */
+static bool event_in_list_half(lv_event_t *e)
+{
+    /* LVGL 9 hands the indev over as the event's parameter; lv_event_get_indev() is
+     * NULL for these click events. Fall back to the active indev, which is this one
+     * while its own event is being dispatched. */
+    const lv_indev_t *indev = lv_event_get_param(e);
+    lv_point_t        p = { 0, 0 };
+
+    if (indev == NULL) {
+        indev = lv_indev_active();
+    }
+    if (indev == NULL) {
+        return false;
+    }
+    lv_indev_get_point(indev, &p);
+
+    return SPLIT ? (p.x >= SCR_W / 2) : (p.y >= SCR_H / 2);
 }
 
 static void screen_event_cb(lv_event_t *e)
 {
     switch (lv_event_get_code(e)) {
-    case LV_EVENT_PRESSED:
-        s_long_fired = false;
-        break;
-
-    case LV_EVENT_LONG_PRESSED:
-        s_long_fired = true;
-        s_longs++;
-        ui_companion_on_toggle_overlay();
-        break;
-
-    case LV_EVENT_CLICKED: {
-        if (s_long_fired) {
-            break; /* the long press owns this press */
-        }
-
-        const lv_indev_t *indev = lv_indev_get_act();
-        if (indev == NULL) {
-            break;
-        }
-
-        lv_point_t p = { 0, 0 };
-        lv_indev_get_point(indev, &p);
-
-        /* Portrait: the list is the bottom half. Landscape: the list is the right
-         * half, its column starting at x=148 of 320. */
-        const bool list_half = SPLIT ? (p.x >= SCR_W / 2) : (p.y >= SCR_H / 2);
-
-        const bool dbl = s_have_last_click && (s_last_click_list == list_half) &&
-                         lv_tick_elaps(s_last_click_tick) <= DOUBLE_MS;
-
-        s_have_last_click = !dbl; /* a third click starts over rather than chaining */
-        s_last_click_tick = lv_tick_get();
-        s_last_click_list = list_half;
-
-        /* Which gesture this was, as the UI understood it. The driver has already
-         * logged the touch itself, so the pair of lines says whether a gesture
-         * that did nothing was not recognised or recognised and then had no
-         * visible effect. */
-        UI_LOGI(TAG, "click %s%s", list_half ? "list" : "face", dbl ? " (double)" : "");
-
-        if (dbl) {
-            /* Cancel the page the first click of this pair left waiting: the pair
-             * means the overlay, and the list should not also move. */
-            if (s_page_timer != NULL) {
-                lv_timer_del(s_page_timer);
-                s_page_timer = NULL;
-            }
-
-            s_doubles++;
-            if (list_half) {
-                ui_companion_on_toggle_overlay();
-            } else {
-                ui_companion_on_switch_view(1);
-            }
-            break;
-        }
-
-        if (list_half) {
-            if (s_page_timer != NULL) {
-                lv_timer_del(s_page_timer);
-            }
-            s_page_timer = lv_timer_create(page_timer_cb, DOUBLE_MS, NULL);
-            lv_timer_set_repeat_count(s_page_timer, 1);
+    case LV_EVENT_SINGLE_CLICKED:
+        if (event_in_list_half(e)) {
+            s_page_due = PAGE_DELAY_TICKS;
         } else {
             ui_companion_on_tap();
         }
         break;
-    }
+
+    case LV_EVENT_DOUBLE_CLICKED:
+        page_delay_cancel();   /* the pair means the overlay, not a page */
+        s_doubles++;
+
+        if (event_in_list_half(e)) {
+            ui_companion_on_toggle_overlay();
+        } else {
+            ui_companion_on_switch_view(1);
+        }
+        break;
+
+    case LV_EVENT_LONG_PRESSED:
+        s_longs++;
+        ui_companion_on_toggle_overlay();
+        break;
+
     default:
         break;
     }
@@ -1974,33 +1613,19 @@ void ui_companion_on_tap(void)
     s_taps++;  /* kept here rather than in the event callback so the harness's
                 * direct calls are counted too */
     herdr_client_poll_now();
+
+    /* A wink is the face's acknowledgement of the poke; the ring is the mood's. */
+    mood_face_set(MOOD_FACE_WINK, false);
+    s_face_reaction = FACE_REACTION_TICKS;
+
     ui_flourish_start();
-
-    if (s_squash_running) return;
-
-    /* The squash owns the body's y/height until it finishes. */
-    lv_anim_del(s_body, anim_body_bob);
-    s_bob_running = false;
-
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, s_body);
-    lv_anim_set_exec_cb(&a, anim_body_squash);
-    lv_anim_set_values(&a, BODY_D, BODY_D - BODY_SQUASH_D);
-    lv_anim_set_time(&a, 120);
-    lv_anim_set_playback_time(&a, 120);
-    lv_anim_set_repeat_count(&a, 1);
-    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
-    lv_anim_set_ready_cb(&a, squash_ready_cb);
-    lv_anim_start(&a);
-    s_squash_running = true;
 }
 
 /* ---- entry point -------------------------------------------------------- */
 
 void ui_companion_create(void)
 {
-    lv_obj_t *scr = lv_scr_act();
+    lv_obj_t *scr = lv_screen_active();
     s_scr = scr;
     ui_layout_init(lv_obj_get_width(scr), lv_obj_get_height(scr));
 
@@ -2057,70 +1682,22 @@ void ui_companion_create(void)
         lv_obj_align(s_headline, LV_ALIGN_TOP_MID, 0, HEADLINE_Y);
     }
 
-    /* The ring is the static track; the sweep spins on top of it. */
-    s_ring = create_blob(s_mood_cont, RING_D, RING_D, BODY_CX, BODY_CY);
-    lv_obj_set_style_border_width(s_ring, RING_W, 0);
-    lv_obj_set_style_border_color(s_ring, lv_color_hex(COL_TRACK), 0);
-    lv_obj_set_style_border_opa(s_ring, LV_OPA_COVER, 0);
+    /* The face itself: a widget from components/lvgl_kawaii_face (wrapped by
+     * mood_face.c) that fills this panel, so the panel's size and position are the
+     * whole layout. Everything the blob drew for a face — eyes, glints, blush,
+     * mouth, sweat, alert marker, "z"s, ring — comes from it now. */
+    s_face = lv_obj_create(s_mood_cont);
+    make_passive(s_face);
+    lv_obj_set_size(s_face, BODY_D, BODY_D);
+    lv_obj_set_pos(s_face, BODY_CX - BODY_D / 2, BODY_CY - BODY_D / 2);
+    lv_obj_set_style_bg_opa(s_face, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_face, 0, 0);
+    lv_obj_set_style_radius(s_face, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_all(s_face, 0, 0);
+    mood_face_create(s_face);
 
-    s_sweep = create_arc(s_mood_cont, RING_D, BODY_CX, BODY_CY, RING_W);
-    lv_arc_set_angles(s_sweep, 0, SWEEP_SPAN);
-
-    s_body = create_blob(s_mood_cont, BODY_D, BODY_D, BODY_CX, BODY_CY);
-    lv_obj_set_style_bg_opa(s_body, LV_OPA_COVER, 0);
-
-    for (int i = 0; i < 2; i++) {
-        const lv_coord_t bx = BODY_CX + (i == 0 ? -BLUSH_DX : BLUSH_DX);
-
-        s_blush[i] = create_blob(s_mood_cont, BLUSH_W, BLUSH_H, bx, BLUSH_CY);
-        lv_obj_set_style_bg_color(s_blush[i], lv_color_hex(COL_BLUSH), 0);
-    }
-
-    for (int i = 0; i < 2; i++) {
-        s_eye[i] = create_blob(s_mood_cont, EYE_W, EYE_H, BODY_CX + (i == 0 ? -EYE_DX : EYE_DX), EYE_CY);
-        lv_obj_set_style_bg_color(s_eye[i], lv_color_hex(COL_FACE), 0);
-        lv_obj_set_style_bg_opa(s_eye[i], LV_OPA_COVER, 0);
-        /* The glint is a child of the eye, so a glance carries it along and the
-         * clip removes it as the lid closes — no animation has to know about it. */
-        lv_obj_set_style_clip_corner(s_eye[i], true, 0);
-        s_glint[i] = create_blob(s_eye[i], GLINT_D, GLINT_D, GLINT_OX + GLINT_D / 2, GLINT_OY + GLINT_D / 2);
-        lv_obj_set_style_bg_color(s_glint[i], lv_color_hex(COL_GLINT), 0);
-        lv_obj_set_style_bg_opa(s_glint[i], LV_OPA_COVER, 0);
-    }
-
-    s_mouth = create_arc(s_mood_cont, MOUTH_D, MOUTH_CX, MOUTH_CY, MOUTH_W);
-    lv_obj_set_style_arc_color(s_mouth, lv_color_hex(COL_FACE), LV_PART_INDICATOR);
-    lv_arc_set_angles(s_mouth, 45, 135);
-
-    s_mouth_flat = create_blob(s_mood_cont, MOUTH_FLAT_W, MOUTH_FLAT_H, MOUTH_CX, MOUTH_CY);
-    lv_obj_set_style_bg_color(s_mouth_flat, lv_color_hex(COL_FACE), 0);
-    lv_obj_set_style_bg_opa(s_mouth_flat, LV_OPA_COVER, 0);
-
-    /* In front of the face: it has to slide over the cheek. */
-    s_sweat = create_blob(s_mood_cont, SWEAT_W, SWEAT_H, SWEAT_X0, SWEAT_Y0);
-    lv_obj_set_style_bg_color(s_sweat, lv_color_hex(COL_DROP), 0);
-
-    s_alert = lv_label_create(s_mood_cont);
-    make_passive(s_alert);
-    lv_label_set_text(s_alert, "!");
-    lv_obj_set_style_text_font(s_alert, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(s_alert, lv_color_hex(COL_BLOCKED), 0);
-    lv_obj_set_pos(s_alert, ALERT_X, ALERT_Y);
-
-    s_z = lv_label_create(s_mood_cont);
-    make_passive(s_z);
-    lv_label_set_text(s_z, "z");
-    lv_obj_set_style_text_font(s_z, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_z, lv_color_hex(COL_DIM), 0);
-    lv_obj_set_pos(s_z, Z_CX, Z_BASE_Y);
-
-    s_z2 = lv_label_create(s_mood_cont);
-    make_passive(s_z2);
-    lv_label_set_text(s_z2, "z");
-    lv_obj_set_style_text_font(s_z2, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(s_z2, lv_color_hex(COL_DIM), 0);
-    lv_obj_set_pos(s_z2, Z_CX + Z2_DX, Z_BASE_Y);
-
+    /* One row per agent: dot, label, state. PAGE_DELAY_TICKS's paging swaps which
+     * slice of the list is shown, never the rows themselves. */
     for (int i = 0; i < UI_ROWS; i++) {
         lv_obj_t *row = lv_obj_create(s_mood_cont);
         make_passive(row);
@@ -2212,12 +1789,8 @@ void ui_companion_create(void)
 
     /* A rebuilt screen starts on the companion view, page one, no overlay: those
      * pointers all died with the previous screen. */
-    if (s_page_timer != NULL) {
-        lv_timer_del(s_page_timer);   /* it would fire onto the previous screen */
-        s_page_timer = NULL;
-    }
-    s_long_fired      = false;
-    s_have_last_click = false;
+    s_page_due = 0;
+
     s_view            = UI_VIEW_MOOD;
     s_page         = 0;
     s_stats_page   = 0;
@@ -2237,9 +1810,9 @@ void ui_companion_create(void)
     ui_render_list(&empty);
     ui_render_summary(&empty);
 
-    /* Glances are event-like, so they run off their own fixed-period timer with
-     * an internal random countdown (see ui_look_fire). */
-    lv_timer_create(ui_look_fire, UI_LOOK_TICK, NULL);
 
-    lv_timer_create(ui_tick, UI_LOOK_TICK, NULL);
+    if (s_ui_timer != NULL) {
+        lv_timer_del(s_ui_timer);   /* the previous screen's timer: its screen is gone */
+    }
+    s_ui_timer = lv_timer_create(ui_tick, UI_LOOK_TICK, NULL);
 }

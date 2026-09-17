@@ -58,8 +58,12 @@ static inline const char *herdr_state_name(herdr_agent_state_t s)
 #define UI_LOGI(tag, fmt, ...) ESP_LOGI(tag, fmt, ##__VA_ARGS__)
 #define UI_LOGW(tag, fmt, ...) ESP_LOGW(tag, fmt, ##__VA_ARGS__)
 #else
-#define UI_LOGI(tag, fmt, ...) ((void)0)
-#define UI_LOGW(tag, fmt, ...) ((void)0)
+/* The host harnesses (AGENTS.md §9a) compile this file without ESP-IDF; printing to
+ * stderr keeps the UI's own account of what it decided available there, which is the
+ * only way a failing scenario can say *why* a click did nothing. */
+#include <stdio.h>
+#define UI_LOGI(tag, fmt, ...) fprintf(stderr, "[%s] " fmt "\n", tag, ##__VA_ARGS__)
+#define UI_LOGW(tag, fmt, ...) fprintf(stderr, "[%s] " fmt "\n", tag, ##__VA_ARGS__)
 #endif
 
 /* Session statistics for the stats view, served by the bridge's GET /stats and

@@ -13,10 +13,11 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 
 # --- LVGL ---------------------------------------------------------------
-# The panel is driven in big-endian RGB565 by the JD9853 SPI driver.
-CONFIG_LV_COLOR_16_SWAP=y
+# The panel is driven in big-endian RGB565 by the JD9853 SPI driver, but LVGL 9 has
+# no CONFIG_LV_COLOR_16_SWAP: the byte order is set on the display instead
+# (main.c, flags.swap_bytes). LVGL 9 also allocates through the C library rather
+# than a fixed pool, so CONFIG_LV_MEM_SIZE_KILOBYTES is gone with it.
 CONFIG_LV_COLOR_DEPTH_16=y
-CONFIG_LV_MEM_SIZE_KILOBYTES=48
 
 CONFIG_LV_FONT_MONTSERRAT_10=y    # the stats table's rows: see ui_companion.c
 CONFIG_LV_FONT_MONTSERRAT_12=y
