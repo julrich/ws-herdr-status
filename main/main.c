@@ -55,17 +55,6 @@ esp_lcd_panel_handle_t  app_hw_panel(void) { return s_panel; }
 esp_lcd_touch_handle_t  app_hw_touch(void) { return s_touch; }
 lv_display_t           *app_hw_disp(void) { return s_disp; }
 
-/* The vendor's table for this panel (AGENTS.md §5) and its touch driver (§7).
- * Both are indexed by the angle the *device* has been turned by. */
-/* The vendor's mapping for this panel (AGENTS.md §5), in the one orientation this
- * project uses: no swap, no mirror, and the 34 px GRAM gap. */
-static void apply_panel(void)
-{
-    esp_lcd_panel_swap_xy(s_panel, false);
-    esp_lcd_panel_mirror(s_panel, false, false);
-    esp_lcd_panel_set_gap(s_panel, LCD_GAP_X, LCD_GAP_Y);
-}
-
 /* Build the UI on a fresh screen, in the panel's one supported orientation. The old
  * screen is freed by the auto-delete (the host harness relies on the same behaviour).
  *

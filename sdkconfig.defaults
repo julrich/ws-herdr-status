@@ -30,11 +30,15 @@ CONFIG_LV_USE_ASSERT_NULL=y
 CONFIG_LV_USE_ASSERT_MALLOC=y
 
 # --- network ------------------------------------------------------------
-# WiFi + the HTTP poller share the heap with LVGL; trim the LVGL side (done
-# above: CONFIG_LV_MEM_SIZE_KILOBYTES=48, from the template's 64).
+# WiFi + the HTTP poller share the heap with LVGL. There is no LVGL pool to trim in
+# LVGL 9 — it allocates through the C library (see above) — so the setting that used
+# to be trimmed here no longer exists. Note for anyone editing this file: the scanner
+# reads "NAME=value" even inside a comment, so naming a symbol that way warns about it.
 # CONFIG_ESP_WIFI_ENABLED is a derived symbol (default y on SOC_WIFI_SUPPORTED,
 # no prompt) — it cannot be assigned here; it lands in the generated sdkconfig
 # automatically.
 
-# Fewer transactions on the I2C bus shared with the IMU (see AGENTS.md §7).
-CONFIG_LV_INDEV_DEF_READ_PERIOD=50
+# No INDEV_DEF_READ_PERIOD: LVGL 9 dropped it and gives every indev its own read timer,
+# so assigning it here did nothing (it warns and is ignored). The I2C traffic it was
+# meant to reduce is instead governed by the touch driver, which reads only when the
+# controller's interrupt says there is a report (AGENTS.md §7).

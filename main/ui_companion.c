@@ -379,21 +379,15 @@ static const flourish_cfg_t s_flourish[MOOD_N] = {
 static mood_t   s_mood;
 static uint32_t s_last_gen;
 
-/* Output tokens per second, per agent, from successive /stats fetches: the list shows
- * this for a working agent instead of the word "working", because a number that moves
- * says more about a busy one than a status that has not changed in an hour. A session
- * that has gone quiet reports zero rather than its last burst. */
-#define RATE_STALE_S 20
-static uint32_t s_rate[HERDR_MAX_AGENTS];
-static uint32_t s_prev_out[HERDR_MAX_AGENTS];
-static uint32_t s_out_changed_ms[HERDR_MAX_AGENTS];  /* when each total last moved */
+/* The device used to work out its own tokens-per-second from successive /stats fetches,
+ * and to drive the blob's eyes through a glance offset of its own. Both are gone: the
+ * rows show the bridge's figure, which is omp's own over its last turns, and the kawaii
+ * face animates its own eyes (AGENTS.md §11). */
 static uint32_t s_sessions_sig;      /* the rows' figures, summed: see ui_tick */
 static bool     s_sessions_moved;
-static bool     s_have_prev;
 static bool     s_last_online;
 static mood_t   s_last_mood;
 static uint32_t s_burst_colour;  /* mood colour of the ripple/tint burst in flight */
-static int32_t  s_eye_dx;        /* current sideways glance offset, px */
 
 /* Per-particle parameters, filled in when a mote/confetti run starts. Motes use
  * x0/y0 as the resting spot and y1 as the travel; confetti uses x0,y0 -> x1,y1. */
@@ -556,22 +550,6 @@ static lv_obj_t *create_blob(lv_obj_t *parent, lv_coord_t w, lv_coord_t h, lv_co
     lv_obj_set_style_border_width(obj, 0, 0);
     lv_obj_set_style_pad_all(obj, 0, 0);
     return obj;
-}
-
-/* An arc that draws no track of its own -- a separate object is the track. */
-static lv_obj_t *create_arc(lv_obj_t *parent, lv_coord_t d, lv_coord_t cx, lv_coord_t cy, int32_t width)
-{
-    lv_obj_t *arc = lv_arc_create(parent);
-    make_passive(arc);
-    lv_obj_set_size(arc, d, d);
-    lv_obj_set_pos(arc, cx - d / 2, cy - d / 2);
-    lv_obj_remove_style(arc, NULL, LV_PART_KNOB);
-    lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_arc_width(arc, 0, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(arc, width, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_rounded(arc, true, LV_PART_INDICATOR);
-    lv_obj_set_style_pad_all(arc, 0, 0);
-    return arc;
 }
 
 static void start_anim(lv_obj_t *obj, lv_anim_exec_xcb_t exec, int32_t from, int32_t to,
