@@ -1434,7 +1434,12 @@ static void ui_render_totals(const herdr_status_t *s)
         for (int i = 0; i < s->count; i++) {
             cost += sess.per[i].cost_micro;
 
-            if (sess.per[i].tokens_per_s > 0) {
+            /* Only the agents whose rows *show* a rate, so the foot and the rows always add
+             * up. An idle agent's row shows its spend instead, but its session still
+             * reports the rate of its last turns — the bridge's figure is a trailing window
+             * over the last few of them and does not decay when the agent stops — so
+             * summing every session's rate read persistently high. */
+            if (s->agents[i].state == HERDR_ST_WORKING && sess.per[i].tokens_per_s > 0) {
                 rate += sess.per[i].tokens_per_s;
                 rated++;
             }
