@@ -639,9 +639,21 @@ Two halves, no USB link needed after flashing:
   guessed: 4 KB overflowed the stack guard on the very first poll, inside
   `_malloc_r` reached from the cJSON/HTTP path.
 - `wifi_sta.c` sets **`WIFI_PS_NONE`** deliberately. With `WIFI_PS_MIN_MODEM`
-  against this AP (Fritz!Box, 2.4 GHz, HE) the device's TCP handshakes reached
+  against this AP (a Telekom Speedport, 2.4 GHz, HE — the `speedport.ip` search
+domain and the DHCP options say so; an earlier note here said Fritz!Box) the device's
+TCP handshakes reached
   the PC but the replies were never ACKed — every poll died on a 3 s
   `select() timeout`. Power save buys nothing on a mains-powered desk toy.
+- `CONFIG_HERDR_BRIDGE_HOST` may be a **name**, not just an address, and that is the
+  better choice on a LAN whose leases move: the router publishes this machine as
+  `<hostname>.speedport.ip`, the device is handed the same DNS server the PC uses, and
+  one is resolved **per request** (both HTTP clients are built per poll), so an address
+  change is picked up on the next poll with no reboot. Use the *full* name — lwIP ignores
+  the DHCP search list, so a bare `calculatron` only resolves on the PC (via
+  `nss-myhostname`, to `127.0.0.1`, which is worse than useless). The clients also pin
+  `HTTP_ADDR_TYPE_INET`: the bridge listens on IPv4 only, while the router answers an
+  AAAA as well, and an unpinned lookup can hand lwIP that one first — which fails as a
+  connect timeout that looks exactly like a firewall or a stale address.
 - `CONFIG_HERDR_WIFI_SSID` / `_PASSWORD` / `_BRIDGE_HOST` / `_BRIDGE_PORT` /
   `_POLL_PERIOD_MS` / `_UI_MAX_AGENTS` live in `sdkconfig` (`main/Kconfig.projbuild`),
   which is gitignored — credentials must never land in `sdkconfig.defaults`.

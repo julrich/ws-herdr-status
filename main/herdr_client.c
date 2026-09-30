@@ -328,8 +328,14 @@ static void poll_failed(void)
 static void poll_stats(void)
 {
     struct poll_ctx ctx = { 0 };
+    /* The bridge is an IPv4 HTTP server (`0.0.0.0:8787`), but `CONFIG_HERDR_BRIDGE_HOST`
+     * may be a *name* — and a router that publishes both families for it hands the client
+     * an AAAA as well. Unspecified (the default) means lwIP may pick that one first, and
+     * the connect then times out against a socket the bridge is not listening on: a
+     * numeric host worked while the same host by name did not. Pin the family. */
     const esp_http_client_config_t cfg = {
         .url = s_url_stats,
+        .addr_type = HTTP_ADDR_TYPE_INET,
         .timeout_ms = 3000,
         .method = HTTP_METHOD_GET,
         .event_handler = http_evt,
@@ -379,6 +385,7 @@ static void poll_once(void)
     struct poll_ctx ctx = { 0 }; /* 2064 B: the biggest stack consumer (see budget above) */
     const esp_http_client_config_t cfg = {
         .url = s_url,
+        .addr_type = HTTP_ADDR_TYPE_INET,   /* see the note in poll_stats() */
         .timeout_ms = 3000,
         .method = HTTP_METHOD_GET,
         .event_handler = http_evt,
