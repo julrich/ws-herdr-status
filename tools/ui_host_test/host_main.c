@@ -425,14 +425,18 @@ static void load_scenario(const char *name)
         snprintf(g_sessions.per[0].model, sizeof g_sessions.per[0].model, "deepseek-v4.1-f");
     }
     else if(strcmp(name, "overflow") == 0 || strcmp(name, "paging") == 0) {
-        static const char *labels[HERDR_MAX_AGENTS] = {
-            "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"
+        /* More agents than the list has rows — that is what this exercises, and eight
+         * make exactly two pages of four. The count is the fixture's, deliberately not
+         * HERDR_MAX_AGENTS: the wire cap is a capacity, and tying the scenarios to it
+         * would make every expectation here move whenever that number is resized. */
+        static const char *labels[8] = {
+            "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"
         };
-        for(int i = 0; i < HERDR_MAX_AGENTS; i++) {
+        for(int i = 0; i < 8; i++) {
             set_agent(i, labels[i], "omp", HERDR_ST_WORKING, i == 0);
         }
-        g_status.count    = HERDR_MAX_AGENTS;
-        g_status.overflow = HERDR_MAX_AGENTS - CONFIG_HERDR_UI_MAX_AGENTS;
+        g_status.count    = 8;
+        g_status.overflow = 8 - CONFIG_HERDR_UI_MAX_AGENTS;
     }
     else if(strcmp(name, "tap") == 0) {
         set_agent(0, "PoC", "omp", HERDR_ST_WORKING, true);
