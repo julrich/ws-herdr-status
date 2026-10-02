@@ -1003,6 +1003,22 @@ static void stats_row(int idx, lv_coord_t x, const char *left)
     stats_line(idx, "%s", left);
 }
 
+/* The /stats snapshot the renderers read, refilled on demand.
+ *
+ * One copy, not one per function: herdr_sessions_t is ~700 B with the agent cap at 16,
+ * and these renderers run in the LVGL task — the task that draws, with its drawing
+ * frames on the same stack. A local copy there overflowed an 8 KB stack the first time
+ * a list that size was rendered (panic inside lv_draw_sw_line, 2026-10-02). The UI is
+ * the only reader and runs on one task, so a single static is enough; it is refilled per
+ * render pass, which is what the per-call fetches did before.
+ */
+static herdr_sessions_t s_sess;
+
+static const herdr_sessions_t *sessions_now(void)
+{
+    return (herdr_stats_get(&s_sess) && s_sess.valid) ? &s_sess : NULL;
+}
+
 static void ui_stats_render(void)
 {
     herdr_link_stats_t link = { 0 };
@@ -1069,8 +1085,8 @@ static void ui_stats_render(void)
 
     /* Sessions page: what the agents have actually been doing, from the bridge's
      * read of their session logs. */
-    herdr_sessions_t sess = { 0 };
-    const bool       have_sessions = herdr_stats_get(&sess) && sess.valid;
+    const herdr_sessions_t *sess          = sessions_now();
+    const bool              have_sessions = sess != NULL;
 
     if (!have_sessions) {
         /* Two lines, ASCII only: the bundled fonts stop at 0x7F, so an em-dash or a
@@ -1083,18 +1099,18 @@ static void ui_stats_render(void)
 
     char tin[16], tout[16], cost[16], age[12];
 
-    fmt_tokens(tin, sizeof tin, sess.tokens_in);
-    fmt_tokens(tout, sizeof tout, sess.tokens_out);
-    fmt_cost(cost, sizeof cost, sess.cost_micro);
-    fmt_age(age, sizeof age, sess.age_s);
+    fmt_tokens(tin, sizeof tin, sess->tokens_in);
+    fmt_tokens(tout, sizeof tout, sess->tokens_out);
+    fmt_cost(cost, sizeof cost, sess->cost_micro);
+    fmt_age(age, sizeof age, sess->age_s);
 
     stats_header(0, "SESSIONS");
-    stats_val(0, "%u", (unsigned)sess.sessions);
+    stats_val(0, "%u", (unsigned)sess->sessions);
 
     stats_row(1, STATS_X_LEFT, "tokens");
     stats_val(1, "%s in  %s out", tin, tout);
     stats_row(2, STATS_X_LEFT, "activity");
-    stats_val(2, "%u calls  %u msg", (unsigned)sess.tool_calls, (unsigned)sess.messages);
+    stats_val(2, "%u calls  %u msg", (unsigned)sess->tool_calls, (unsigned)sess->messages);
 
     /* The figure worth reading first, so it takes the one accent colour on the page. */
     stats_row(3, STATS_X_LEFT, "spend");
@@ -1107,8 +1123,8 @@ static void ui_stats_render(void)
     const int rows  = (shown < STATS_ROWS) ? shown : STATS_ROWS;
 
     for (int i = 0; i < rows; i++) {
-        fmt_tokens(tin, sizeof tin, sess.per[i].tokens_in);
-        fmt_cost(cost, sizeof cost, sess.per[i].cost_micro);
+        fmt_tokens(tin, sizeof tin, sess->per[i].tokens_in);
+        fmt_cost(cost, sizeof cost, sess->per[i].cost_micro);
 
         /* The label and its token count on the left, the money on the right. */
         stats_style(5 + i, false, STATS_TEXT_X);
@@ -1336,6 +1352,9 @@ static void ui_render_list(const herdr_status_t *s)
     const int first = s_page * UI_ROWS;
     const int shown = (s->count - first < UI_ROWS) ? (s->count - first) : UI_ROWS;
 
+    const herdr_sessions_t *sess          = sessions_now();   /* once for every row */
+    const bool              have_sessions = sess != NULL;
+
     for (int i = 0; i < UI_ROWS; i++) {
         if (i >= shown || i + first >= s->count) {
             lv_obj_add_flag(s_row[i], LV_OBJ_FLAG_HIDDEN);
@@ -1357,21 +1376,19 @@ static void ui_render_list(const herdr_status_t *s)
          * token rate, an idle one what its session has cost, and the rest keep the
          * state word they share with the mood. Both figures come from /stats, whose
          * rows are keyed and ordered like the agents. */
-        herdr_sessions_t sess = { 0 };
-        const bool       have_sessions = herdr_stats_get(&sess) && sess.valid;
         const int        idx = first + i;
 
-        if (have_sessions && a->state == HERDR_ST_WORKING && sess.per[idx].tokens_per_s > 0) {
+        if (have_sessions && a->state == HERDR_ST_WORKING && sess->per[idx].tokens_per_s > 0) {
             char tok[16], rate[24];
 
-            fmt_tokens(tok, sizeof tok, sess.per[idx].tokens_per_s);
+            fmt_tokens(tok, sizeof tok, sess->per[idx].tokens_per_s);
             snprintf(rate, sizeof rate, "%s/s", tok);
             lv_label_set_text(s_row_status[i], rate);
             lv_obj_set_style_text_color(s_row_status[i], lv_color_hex(COL_RATE), 0);
         } else if (have_sessions && a->state == HERDR_ST_IDLE) {
             char cost[16];
 
-            fmt_cost(cost, sizeof cost, sess.per[idx].cost_micro);
+            fmt_cost(cost, sizeof cost, sess->per[idx].cost_micro);
             lv_label_set_text(s_row_status[i], cost);
             lv_obj_set_style_text_color(s_row_status[i], lv_color_hex(COL_MONEY), 0);
         } else {
@@ -1403,22 +1420,22 @@ static void ui_render_totals(const herdr_status_t *s)
         return;
     }
 
-    herdr_sessions_t sess = { 0 };
-    const bool       have = herdr_stats_get(&sess) && sess.valid;
+    const herdr_sessions_t *sess = sessions_now();
+    const bool              have = sess != NULL;
     uint32_t         cost = 0, rate = 0;
     int              rated = 0;
 
     if (have) {
         for (int i = 0; i < s->count; i++) {
-            cost += sess.per[i].cost_micro;
+            cost += sess->per[i].cost_micro;
 
             /* Only the agents whose rows *show* a rate, so the foot and the rows always add
              * up. An idle agent's row shows its spend instead, but its session still
              * reports the rate of its last turns — the bridge's figure is a trailing window
              * over the last few of them and does not decay when the agent stops — so
              * summing every session's rate read persistently high. */
-            if (s->agents[i].state == HERDR_ST_WORKING && sess.per[i].tokens_per_s > 0) {
-                rate += sess.per[i].tokens_per_s;
+            if (s->agents[i].state == HERDR_ST_WORKING && sess->per[i].tokens_per_s > 0) {
+                rate += sess->per[i].tokens_per_s;
                 rated++;
             }
         }
@@ -1556,14 +1573,14 @@ static void ui_tick(lv_timer_t *timer)
      * agent's state happened to change. The figures themselves come from /stats as it
      * reports them — the rate is omp's own, not something computed here. */
     {
-        herdr_sessions_t sess = { 0 };
+        const herdr_sessions_t *sess = sessions_now();
 
-        if (herdr_stats_get(&sess) && sess.valid) {
+        if (sess != NULL) {
             uint32_t sig = 0;
 
             for (int i = 0; i < HERDR_MAX_AGENTS; i++) {
-                sig += sess.per[i].tokens_out + sess.per[i].cost_micro +
-                       sess.per[i].tokens_per_s;
+                sig += sess->per[i].tokens_out + sess->per[i].cost_micro +
+                       sess->per[i].tokens_per_s;
             }
             s_sessions_moved = (sig != s_sessions_sig);
             s_sessions_sig   = sig;

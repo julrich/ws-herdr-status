@@ -37,12 +37,14 @@ static const char *TAG = "herdr";
 
 /* Stack for `herdr_poll`, set in herdr_client_start. Measured on this board: 4096 B
  * overflowed the guard on the very first poll (stack protection fault inside _malloc_r,
- * reached from the JSON/HTTP path), so 8192 B it was with a 2 KB body. The body is
- * HERDR_HTTP_BUF now and the context is held on this stack, so the size went up with it:
- * the frames are what was measured, the buffer is arithmetic. The task logs its own
- * low-water mark after the first poll — read that rather than trusting this number.
+ * reached from the JSON/HTTP path), so 8192 B it was with a 2 KB body. The body is now
+ * HERDR_HTTP_BUF — 8 KB of the budget — the parser's own entry array is ~1 KB, and the
+ * frames are the <=6 KB the 8 KB/2 KB config left room for: ~15 KB, so 24 KB with room
+ * to spare. 16 KB was the previous guess and it did *not* survive contact, which is
+ * exactly why the task logs its own low-water mark after the first poll: read that
+ * figure rather than this arithmetic.
  */
-#define HERDR_POLL_STACK 16384
+#define HERDR_POLL_STACK 24576
 
 static char s_url[128];
 static char s_url_stats[128]; /* the sessions endpoint lives on the same bridge */
