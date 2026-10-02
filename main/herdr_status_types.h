@@ -8,8 +8,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Agents the wire parser will hold. */
-#define HERDR_MAX_AGENTS 6
+/* Agents the wire parser will hold. Sized from the desk rather than from a test: 14
+ * agents were running on 2026-10-02, and the wire document grows with them (/stats
+ * measured 2410 B at that count, which is what overran the poll buffer). The body
+ * buffer and the poll stack in herdr_client.c are sized to match this. */
+#define HERDR_MAX_AGENTS 16
 /* Label buffer: the bridge already truncates to 40 bytes of printable ASCII. */
 #define HERDR_LABEL_LEN 40
 
