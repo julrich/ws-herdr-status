@@ -82,12 +82,12 @@ static esp_err_t lvgl_start(void)
 {
     const lvgl_port_cfg_t port_cfg = {
         .task_priority = 4,
-        /* 12 KB rather than the vendor's 8: the UI draws on this stack, and a 700 B
-         * snapshot local in the renderers was enough to overflow 8 KB the first time a
-         * 16-agent list was rendered (panic inside lv_draw_sw_line, 2026-10-02). That
-         * local is one static now, so the old size would probably do — but a task that
-         * draws every pixel is not the place to spend the last kilobyte. */
-        .task_stack = 1024 * 12,
+        /* 24 KB, three times the vendor's 8: every pixel is drawn on this stack, and the
+         * kawaii face draws its canvases through LVGL's line/fill path on its own timer —
+         * the same path that overflowed the main task's default stack (draw_eye ->
+         * lv_canvas_finish_layer -> lv_draw_sw_line, 2026-10-02). 12 KB still panicked.
+         * Sized by that panic, not by arithmetic: 12 KB was not enough. */
+        .task_stack = 1024 * 24,
         .task_affinity = -1,        /* no affinity: the C6 has a single HP core */
         .task_max_sleep_ms = 500,
         .timer_period_ms = 5,

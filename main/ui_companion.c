@@ -1530,6 +1530,7 @@ static void ui_render_summary(const herdr_status_t *s)
 /* Runs in the LVGL task (lv_timer), so it is the only task that touches LVGL. */
 static void ui_tick(lv_timer_t *timer)
 {
+
     /* Every timer in this UI is due every UI_LOOK_TICK. A run that is later than
      * the slack below means the LVGL task did not get the CPU — which is what a
      * marginal WiFi link does to it, since the WiFi task runs at priority 23 and
