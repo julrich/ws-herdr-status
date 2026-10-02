@@ -16,7 +16,7 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 # canvases through LVGL's line/fill path while it does so: draw_eye -> lv_canvas_finish_layer
 # -> lv_draw_sw_line needs more than the IDF default of 3584 B, which panicked and
 # boot-looped the board on 2026-10-02. 8 KB.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
 # --- LVGL ---------------------------------------------------------------
 # The panel is driven in big-endian RGB565 by the JD9853 SPI driver, but LVGL 9 has
