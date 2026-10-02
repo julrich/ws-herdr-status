@@ -27,19 +27,22 @@
 
 static const char *TAG = "herdr";
 
-/* Stack for `herdr_poll`, set in herdr_client_start. Measured on this board:
- * 4096 B overflowed the guard on the very first poll (stack protection fault
- * inside _malloc_r, reached from the JSON/HTTP path), so 8192 B it is.
- *   poll_ctx (stack local)                                  2056 B
- *     = char[2048] + size_t(4) + bool(1) + 3 B padding (ILP32)
- *   call frames: esp_http_client_perform + lwip + cJSON + esp_log  >2 KB
- * The body buffer dominates by design (no malloc in the poll path); a body that
- * would overflow it is flagged via poll_ctx.truncated and counted as a failed
- * poll, never silently truncated. The live bridge body measures ~224 B, so
- * 2048 B is ~9x headroom. Shrink the buffer rather than the timeout if this
- * ever gets tight again.
+/* The body buffer, on the poll task's stack. A whole document has to fit: the bridge's
+ * /stats is proportional to the agents the user is running — 2410 B at 14 agents on
+ * 2026-10-02, against the ~224 B this was sized for — and a body that does not fit is
+ * dropped whole (see http_evt), taking every figure the stats view and the panel's foot
+ * show with it, silently. 8192 B is ~45 agents of /stats and ~70 of /state.
  */
-#define HERDR_POLL_STACK 8192
+#define HERDR_HTTP_BUF 8192
+
+/* Stack for `herdr_poll`, set in herdr_client_start. Measured on this board: 4096 B
+ * overflowed the guard on the very first poll (stack protection fault inside _malloc_r,
+ * reached from the JSON/HTTP path), so 8192 B it was with a 2 KB body. The body is
+ * HERDR_HTTP_BUF now and the context is held on this stack, so the size went up with it:
+ * the frames are what was measured, the buffer is arithmetic. The task logs its own
+ * low-water mark after the first poll — read that rather than trusting this number.
+ */
+#define HERDR_POLL_STACK 16384
 
 static char s_url[128];
 static char s_url_stats[128]; /* the sessions endpoint lives on the same bridge */
@@ -68,7 +71,7 @@ static bool     s_gen_logged;
 
 /* Body collector for one poll; lives on the poll task's stack. */
 struct poll_ctx {
-    char   buf[2048];
+    char   buf[HERDR_HTTP_BUF];
     size_t len;
     bool   truncated;
 };
@@ -82,6 +85,12 @@ static esp_err_t http_evt(esp_http_client_event_t *evt)
 
         if (n >= sizeof ctx->buf - ctx->len) {
             n = sizeof ctx->buf - 1 - ctx->len; /* keep room for the NUL terminator */
+
+            if (!ctx->truncated) {
+                /* Loud on purpose, and only once per poll: the body is dropped whole, so
+                 * this is the only sign that a screenful of figures just went missing. */
+                ESP_LOGE(TAG, "body over %d B dropped: raise HERDR_HTTP_BUF", HERDR_HTTP_BUF);
+            }
             ctx->truncated = true;
         }
         memcpy(ctx->buf + ctx->len, evt->data, n);
@@ -382,7 +391,7 @@ static void poll_stats(void)
 
 static void poll_once(void)
 {
-    struct poll_ctx ctx = { 0 }; /* 2064 B: the biggest stack consumer (see budget above) */
+    struct poll_ctx ctx = { 0 }; /* the body buffer lives here: the biggest stack consumer */
     const esp_http_client_config_t cfg = {
         .url = s_url,
         .addr_type = HTTP_ADDR_TYPE_INET,   /* see the note in poll_stats() */
@@ -438,10 +447,21 @@ static void herdr_poll(void *arg)
         }
 
         static uint32_t tick;
+        static bool     logged_stack;
+
         if ((tick++ % HERDR_STATS_EVERY) == 0) {
             poll_stats();
         }
         poll_once();
+
+        /* What this task actually used, said once there is something to measure: the
+         * stack size above is a budget, and this is the figure to check it against. */
+        if (!logged_stack) {
+            logged_stack = true;
+            ESP_LOGI(TAG, "poll stack low-water %u B of %u",
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL) * (unsigned)sizeof(StackType_t),
+                     (unsigned)HERDR_POLL_STACK);
+        }
 
         /* Sleep for the poll period, but let a screen tap cut it short: the
          * notification from herdr_client_poll_now() wakes this wait immediately,
